@@ -1,13 +1,26 @@
 name = "CaratheodoryFejerApprox"
 uuid = "591793e0-8db6-4f40-aac6-a66fe5f65964"
 authors = ["Jonathan Doucette <jdoucette@physics.ubc.ca> and contributors"]
-version = "1.0.0-DEV"
+version = "0.0.1"
+
+[deps]
+ApproxFun = "28f2ccd6-bb30-5033-b560-165f7b14dc2f"
+Arpack = "7d9fca2a-8960-54d3-9f78-7d1dccf2cb97"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 
 [compat]
+ApproxFun = "0.13"
+Arpack = "0.5"
+Aqua = "0.8"
+LinearAlgebra = "1"
+MATLAB = "0.8"
+Test = "1"
 julia = "1.6"
 
 [extras]
+Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
+MATLAB = "10e44e05-a98a-55b3-a45b-ba969058deb6"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["Test"]
+test = ["Aqua", "MATLAB", "Test"]
