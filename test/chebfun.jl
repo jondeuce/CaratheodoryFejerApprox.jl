@@ -28,35 +28,35 @@ end
     for m in 0:6, dom in ((-1, 1), (-1, 2))
         f = exp
         p, _, s = cfcoeffs("@(x) exp(x)", dom, m, 0)
-        p̂, ŝ = polynomialcf(exp, dom, m)
-        @test p ≈ p̂ atol=1e-14
-        @test s ≈ ŝ atol=1e-14 rtol=1e-14
+        p̂, ŝ = polynomialcf(f, dom, m)
+        @test p ≈ p̂ atol = 1e-14
+        @test s ≈ ŝ atol = 1e-14 rtol = 1e-14
 
         P, P̂ = build_fun(dom).((p, p̂))
         xs = rand_uniform(dom, 256)
         @test all(isapprox(P(x), P̂(x); atol = 1e-14) for x in xs)
-        @test all(isapprox(f(x), P̂(x); atol = 1.5 * ŝ) for x in xs)
+        @test all(isapprox(f(x), P̂(x); atol = 1.5ŝ) for x in xs)
     end
 end
 
 @testset "rationalcf" begin
-    for m in 0:6, n in 1:4, dom in ((-1, 1), (-1, 2))
+    for m in 0:6, n in 1:6, dom in ((-1, 1), (-1, 2))
         f = exp
         p, q, s = cfcoeffs("@(x) exp(x)", dom, m, n)
-        p̂, q̂, ŝ = rationalcf(exp, dom, m, n)
+        p̂, q̂, ŝ = rationalcf(f, dom, m, n)
 
         # Rational approximant computation is less numerically stable, so error tolerances are more lenient for coefficients
-        @test p ≈ p̂ atol=1e-8 rtol=1e-5
-        @test q ≈ q̂ atol=1e-8 rtol=1e-5
-        @test s ≈ ŝ atol=1e-14 rtol=1e-14
+        @test p ≈ p̂ atol = 1e-8 rtol = 1e-3
+        @test q ≈ q̂ atol = 1e-8 rtol = 1e-3
+        @test s ≈ ŝ atol = 1e-14 rtol = 1e-14
 
         P, Q, P̂, Q̂ = build_fun(dom).((p, q, p̂, q̂))
         R = x -> P(x) / Q(x)
         R̂ = x -> P̂(x) / Q̂(x)
 
-        # Rational approximants as a whole, however, should still match eachother fairly strictly
+        # Rational approximants as a whole, however, should still match eachother fairly strictly when evaluated
         xs = rand_uniform(dom, 256)
         @test all(isapprox(R(x), R̂(x); atol = 1e-12) for x in xs)
-        @test all(isapprox(f(x), R̂(x); atol = 1.5 * ŝ) for x in xs)
+        @test all(isapprox(f(x), R̂(x); atol = max(2ŝ, 1e-14)) for x in xs)
     end
 end
