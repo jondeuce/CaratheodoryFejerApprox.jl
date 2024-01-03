@@ -6,14 +6,22 @@ version = "0.0.1"
 [deps]
 ApproxFun = "28f2ccd6-bb30-5033-b560-165f7b14dc2f"
 Arpack = "7d9fca2a-8960-54d3-9f78-7d1dccf2cb97"
+FFTW = "7a1cc6ca-52ef-59f5-83cd-3a7055c09341"
+GenericFFT = "a8297547-1b15-4a5a-a998-a2ac5f1cef28"
+GenericLinearAlgebra = "14197337-ba66-59df-a3e3-ca00e7dcff7a"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Polynomials = "f27b6e38-b328-58d1-80ce-0feddd5e7a45"
 
 [compat]
 ApproxFun = "0.13"
-Arpack = "0.5"
 Aqua = "0.8"
+Arpack = "0.5"
+FFTW = "1.7"
+GenericFFT = "0.1"
+GenericLinearAlgebra = "0.3"
 LinearAlgebra = "1"
 MATLAB = "0.8"
+Polynomials = "4"
 Test = "1"
 julia = "1.6"
 

@@ -1,6 +1,6 @@
-function [p, q, s] = cfapprox(f, dom, m, n)
-%CFAPPROX   Caratheodory-Fejer approximation
-%   [P, Q, S] = CFAPPROX(F, DOM, M, N) computes a type (M, N) rational CF
+function [p, q, s] = cfcoeffs(f, dom, m, n)
+%CFCOEFFS   Caratheodory-Fejer approximation
+%   [P, Q, S] = CFCOEFFS(F, DOM, M, N) computes a type (M, N) rational CF
 %   approximant to fun = CHEBFUN(f, dom) via Chebfun's CF(fun, M, N).
 %   Returns vectors P and Q, the Chebyshev coefficients of the numerator
 %   and denominator polynomials of the approximant, and S, the associated
