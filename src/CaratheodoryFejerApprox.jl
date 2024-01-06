@@ -43,20 +43,8 @@ using Setfield: @set
 
 export polynomialcf, rationalcf
 
-Base.@kwdef struct PolynomialCFOptions{T}
-    "Even / odd parity of f(x)"
-    parity::Symbol = :generic
-    "Relative tolerance for chopping off small coefficients"
-    rtolchop::T = eps(T)
-    "Absolute tolerance for chopping off small coefficients"
-    atolchop::T = zero(T)
-end
-
-PolynomialCFOptions(o::PolynomialCFOptions{T}, c::AbstractVector{T}) where {T <: AbstractFloat} = @set o.parity = parity(c)
-PolynomialCFOptions(c::AbstractVector{T}; kwargs...) where {T <: AbstractFloat} = PolynomialCFOptions{T}(; parity = parity(c), kwargs...)
-
-Base.@kwdef struct RationalCFOptions{T <: AbstractFloat}
-    "Even / odd parity of f(x)"
+Base.@kwdef struct CFOptions{T <: AbstractFloat}
+    "Even/odd parity of f(x)"
     parity::Symbol = :generic
     "Relative tolerance for chopping off small coefficients"
     rtolchop::T = eps(T)
@@ -78,44 +66,38 @@ Base.@kwdef struct RationalCFOptions{T <: AbstractFloat}
     quiet::Bool = false
 end
 
-RationalCFOptions(o::RationalCFOptions{T}, c::AbstractVector{T}) where {T <: AbstractFloat} = @set o.parity = parity(c)
-RationalCFOptions(c::AbstractVector{T}; kwargs...) where {T <: AbstractFloat} = RationalCFOptions{T}(; parity = parity(c), kwargs...)
+CFOptions(o::CFOptions{T}, c::AbstractVector{T}) where {T <: AbstractFloat} = @set o.parity = parity(c)
+CFOptions(c::AbstractVector{T}; kwargs...) where {T <: AbstractFloat} = CFOptions{T}(; parity = parity(c), kwargs...)
 
 function polynomialcf(fun::Fun, m::Int, M::Int = ncoefficients(fun) - 1; kwargs...)
     @assert M + 1 <= ncoefficients(fun) "Requested number of Chebyshev expansion coefficients $(M) exceeds the number of coefficients $(ncoefficients(fun)) of the function"
     c = coefficients(check_fun(fun))
     return @views polynomialcf(c[1:M+1], m; kwargs...)
 end
+polynomialcf(c::AbstractVector{<:AbstractFloat}, m::Int; kwargs...) = polynomialcf(c, m, CFOptions(c; kwargs...))
 
 polynomialcf(f, dom::Tuple, m::Int; kwargs...) = polynomialcf(Fun(f, Chebyshev(Interval(dom...))), m; kwargs...)
 polynomialcf(f, m::Int; kwargs...) = polynomialcf(Fun(f), m; kwargs...)
-
-function polynomialcf(c::AbstractVector{T}, m::Int; kwargs...) where {T <: AbstractFloat}
-    return polynomialcf(c, m, PolynomialCFOptions(c; kwargs...))
-end
 
 function rationalcf(fun::Fun, m::Int, n::Int, M::Int = ncoefficients(fun) - 1; kwargs...)
     @assert M + 1 <= ncoefficients(fun) "Requested number of Chebyshev expansion coefficients $(M) exceeds the number of coefficients $(ncoefficients(fun)) of the function"
     c = coefficients(check_fun(fun))
     return @views rationalcf(c[1:M+1], m, n; kwargs...)
 end
+rationalcf(c::AbstractVector{<:AbstractFloat}, m::Int, n::Int; kwargs...) = rationalcf(c, m, n, CFOptions(c; kwargs...))
 
 rationalcf(f, dom::Tuple, m::Int, n::Int; kwargs...) = rationalcf(Fun(f, Chebyshev(Interval(dom...))), m, n; kwargs...)
 rationalcf(f, m::Int, n::Int; kwargs...) = rationalcf(Fun(f), m, n; kwargs...)
 
-function rationalcf(c::AbstractVector{T}, m::Int, n::Int; kwargs...) where {T <: AbstractFloat}
-    return rationalcf(c, m, n, RationalCFOptions(c; kwargs...))
-end
-
-function polynomialcf(c::AbstractVector{T}, m::Int, o::PolynomialCFOptions) where {T <: AbstractFloat}
+function polynomialcf(c::AbstractVector{T}, m::Int, o::CFOptions) where {T <: AbstractFloat}
     @assert !isempty(c) "Chebyshev coefficient vector must be non-empty"
     @assert 0 <= m "Requested polynomial degree m = $(m) must be non-negative"
 
-    c = lazychopcoeffs(c; rtol = o.rtolchop, atol = o.atolchop)
+    c = lazychopcoeffs(c; rtol = o.rtolchop, atol = o.atolchop) # view of non-trivial coefficients
     M = length(c) - 1
     m = min(m, M)
 
-    # Check even / odd symmetries
+    # Check even/odd symmetries
     if o.parity === :even
         m -= isodd(m) # ensure m is even
         isodd(M) && (M -= 1; c = @views c[1:end-1]) # ensure M is even
@@ -125,8 +107,8 @@ function polynomialcf(c::AbstractVector{T}, m::Int, o::PolynomialCFOptions) wher
     end
 
     # Trivial cases
-    m == M && return c[1:M+1], zero(T)
-    m == M - 1 && return c[1:M], abs(c[M+1])
+    m == M && return cleanup_coeffs(c[1:M+1], o), zero(T)
+    m == M - 1 && return cleanup_coeffs(c[1:M], o), abs(c[M+1])
 
     cm = @views c[m+2:M+1]
     D, V = eigs_hankel(cm; nev = 1)
@@ -141,19 +123,19 @@ function polynomialcf(c::AbstractVector{T}, m::Int, o::PolynomialCFOptions) wher
     @views b[m+2:2m+1] .+= b[m:-1:1]
     p = @views c[1:m+1] - b[m+1:2m+1]
 
-    return p, abs(s)
+    return cleanup_coeffs(p, o), abs(s)
 end
 
-function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::RationalCFOptions{T}) where {T <: AbstractFloat}
+function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where {T <: AbstractFloat}
     @assert !isempty(c) "Chebyshev coefficient vector must be non-empty"
     @assert 0 <= m "Requested numerator degree m = $(m) must be non-negative"
     @assert 0 <= n "Requested denominator degree n = $(n) must be non-negative"
 
-    c = lazychopcoeffs(c; rtol = o.rtolchop, atol = o.atolchop)
+    c = lazychopcoeffs(c; rtol = o.rtolchop, atol = o.atolchop) # view of non-trivial coefficients
     M = length(c) - 1
     m = min(m, M)
 
-    # Check even / odd symmetries
+    # For even/odd symmetric functions, we first adjust (m, n) to respect the function symmetry
     if o.parity === :even
         m -= isodd(m) # ensure m is even
         n -= isodd(n) # ensure n is even
@@ -165,7 +147,16 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::RationalCFOptions{T
     end
 
     # Trivial cases
-    (n == 0 || m == M) && return rationalcf_reduced(c, m)
+    (n == 0 || m == M) && return rationalcf_reduced(c, m, o)
+
+    # Now, for even/odd symmetric functions, although we adjusted (m, n) above to respect the function symmetry,
+    # the CF operator is continuous (and numerically stable) if and only if (m, n) lies in the lower-left or upper-right
+    # corner of a 2x2 square block in the CF table. We increase m accordingly, and later prune the extra zero in the numerator.
+    if o.parity === :even
+        m += 1 # move to upper right corner: (m, n) -> (m + 1, n) (note: m and n are both even)
+    elseif o.parity === :odd
+        isodd(m) && (m += 1) # move to lower left corner: (m, n) -> (m + 1, n) (note: m is odd or zero, and n is even)
+    end
 
     # Reorder coeffs and scale T_0 coefficient
     a = copy(c)
@@ -173,19 +164,19 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::RationalCFOptions{T
     reverse!(a)
 
     # Obtain eigenvalues and block structure
-    s, u, k, l, rflag = eigs_hankel_rational(a, m, n; tol = o.atolrat)
+    s, u, k, l, rflag = eigs_hankel_block(a, m, n; tol = o.atolrat)
     if k > 0 || l > 0
         if rflag
             # f is rational (at least up to machine precision)
             p, q = pade(c, m - k, n - k)
-            return p, q, eps(T)
+            return cleanup_coeffs(p, q, o)..., eps(T)
         end
 
         n′ = n - k
-        s, u, k′, l′, _ = eigs_hankel_rational(a, m + l, n′; tol = o.atolrat)
+        s, u, k′, l′, _ = eigs_hankel_block(a, m + l, n′; tol = o.atolrat)
         if k′ > 0 || l′ > 0
             n = n + l
-            s, u, k, l, _ = eigs_hankel_rational(a, m - k, n; tol = o.atolrat)
+            s, u, k, l, _ = eigs_hankel_block(a, m - k, n; tol = o.atolrat)
         else
             n = n′
         end
@@ -255,7 +246,7 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::RationalCFOptions{T
 
     if m == 0
         p = [ct[1] / γ₀]
-        return p, q, s
+        return cleanup_coeffs(p, q, o)..., s
     end
 
     # The following steps reduce the Toeplitz system of size 2*m + 1 to a system of
@@ -274,11 +265,11 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::RationalCFOptions{T
     bc₀ = (ct[1] - dot(B, bc)) / γ₀
     p = @views [bc₀; bc[end:-1:1]]
 
-    return p, q, s
+    return cleanup_coeffs(p, q, o)..., s
 end
 
-function rationalcf_reduced(c::AbstractVector, m::Int)
-    p, s = polynomialcf(c, m)
+function rationalcf_reduced(c::AbstractVector, m::Int, o::CFOptions)
+    p, s = polynomialcf(c, m, o)
     return p, [one(eltype(c))], abs(s)
 end
 
@@ -333,6 +324,31 @@ function pade(c::AbstractVector{T}, m, n) where {T <: AbstractFloat}
     q ./= q[1] / 2
     q[1] = one(T)
 
+    return p, q
+end
+
+function cleanup_coeffs(p::AbstractVector{T}, o::CFOptions{T}) where {T <: AbstractFloat}
+    # Clean up even/odd symmetric coefficients
+    p = paritychop(p, o.parity)
+    if o.parity === :even
+        @views p[2:2:end] .= zero(T)
+    elseif o.parity === :odd
+        @views p[1:2:end] .= zero(T)
+    end
+    return p
+end
+
+function cleanup_coeffs(p::AbstractVector{T}, q::AbstractVector{T}, o::CFOptions{T}) where {T <: AbstractFloat}
+    # Clean up even/odd symmetric coefficients
+    if o.parity === :even
+        p, q = paritychop(p, :even), paritychop(q, :even)
+        @views p[2:2:end] .= zero(T) # even
+        @views q[2:2:end] .= zero(T) # even
+    elseif o.parity === :odd
+        p, q = paritychop(p, :odd), paritychop(q, :even)
+        @views p[1:2:end] .= zero(T) # odd
+        @views q[2:2:end] .= zero(T) # even
+    end
     return p, q
 end
 
@@ -414,7 +430,7 @@ function eigs_hankel(c::AbstractVector{T}; nev = 1) where {T <: AbstractFloat}
     return D, V
 end
 
-function eigs_hankel_rational(a::AbstractVector{T}, m, n; tol = 50 * eps(T)) where {T <: AbstractFloat}
+function eigs_hankel_block(a::AbstractVector{T}, m, n; tol = 50 * eps(T)) where {T <: AbstractFloat}
     # Each Hankel matrix corresponds to one diagonal m - n = const in the CF-table;
     # when a diagonal intersects a square block, the eigenvalues on the
     # intersection are all equal. k and l tell you how many entries on the
@@ -435,12 +451,12 @@ function eigs_hankel_rational(a::AbstractVector{T}, m, n; tol = 50 * eps(T)) whe
     u = V[:, n+1]
 
     k = 0
-    while k < n && abs(D[n-k] - abs(s)) < tol
+    while k < n && abs(abs(D[n-k]) - abs(s)) < tol
         k += 1
     end
 
     l = 0
-    while n + l + 2 < nev && abs(D[n+l+2] - abs(s)) < tol
+    while n + l + 2 < nev && abs(abs(D[n+l+2]) - abs(s)) < tol
         l += 1
     end
 
@@ -531,6 +547,17 @@ function lazychopcoeffs(c::AbstractVector{T}; rtol::T = eps(T), atol::T = zero(T
 end
 chopcoeffs(c::AbstractVector; kwargs...) = collect(lazychopcoeffs(c; kwargs...))
 chopcoeffs(fun::Fun; kwargs...) = Fun(space(fun), chopcoeffs(coefficients(fun); kwargs...))
+
+function lazyparitychop(c::AbstractVector, parity::Symbol)
+    M = length(c) - 1
+    if parity === :even
+        isodd(M) && (M -= 1) # ensure M is even
+    elseif parity === :odd
+        M > 0 && iseven(M) && (M -= 1) # ensure M is odd, or zero
+    end
+    return @views c[1:M+1]
+end
+paritychop(c::AbstractVector, parity::Symbol) = collect(lazyparitychop(c, parity))
 
 # Crude bound on infinity norm of `fun`
 vscale(fun::Fun) = vscale(coefficients(fun))
