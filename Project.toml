@@ -11,6 +11,7 @@ GenericFFT = "a8297547-1b15-4a5a-a998-a2ac5f1cef28"
 GenericLinearAlgebra = "14197337-ba66-59df-a3e3-ca00e7dcff7a"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 Polynomials = "f27b6e38-b328-58d1-80ce-0feddd5e7a45"
+Setfield = "efcf1570-3423-57d1-acb7-fd33fddbac46"
 
 [compat]
 ApproxFun = "0.13"
@@ -22,6 +23,7 @@ GenericLinearAlgebra = "0.3"
 LinearAlgebra = "1"
 MATLAB = "0.8"
 Polynomials = "4"
+Setfield = "1"
 Test = "1"
 julia = "1.6"
 

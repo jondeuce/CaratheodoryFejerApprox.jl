@@ -32,50 +32,101 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 module CaratheodoryFejerApprox
 
-using ApproxFun: Chebyshev, Fun, Interval, coefficients, domain, endpoints, ncoefficients, space
-using Arpack: eigs
-using FFTW: rfft, irfft
-using GenericFFT: GenericFFT # defines generic methods for FFTs
-using GenericLinearAlgebra: GenericLinearAlgebra # defines generic method for `LinearAlgebra.eigen` and `Polynomials.roots`
-using LinearAlgebra: Hermitian, cond, dot, eigen
+using ApproxFun: ApproxFun, Chebyshev, ChebyshevInterval, Fun, Interval, coefficients, domain, endpoints, ncoefficients, space
+using Arpack: Arpack, eigs
+using FFTW: FFTW, rfft, irfft
+using GenericFFT: GenericFFT, GenericFFT # defines generic methods for FFTs
+using GenericLinearAlgebra: GenericLinearAlgebra, GenericLinearAlgebra # defines generic method for `LinearAlgebra.eigen` and `Polynomials.roots`
+using LinearAlgebra: LinearAlgebra, Hermitian, cond, dot, eigen
 using Polynomials: Polynomials, Polynomial
+using Setfield: @set
 
 export polynomialcf, rationalcf
 
-function polynomialcf(fun::Fun, m::Int, M::Int = ncoefficients(fun) - 1)
-    @assert M + 1 <= ncoefficients(fun) "Requested number of Chebyshev expansion coefficients $(M) exceeds the number of coefficients $(ncoefficients(fun)) of the function"
-    fun = check_fun(fun)
-    c = coefficients(fun)[1:M+1]
-    if m >= M
-        return c, zero(eltype(c))
-    else
-        return polynomialcf(c, m)
-    end
+Base.@kwdef struct PolynomialCFOptions{T}
+    "Even / odd parity of f(x)"
+    parity::Symbol = :generic
+    "Relative tolerance for chopping off small coefficients"
+    rtolchop::T = eps(T)
+    "Absolute tolerance for chopping off small coefficients"
+    atolchop::T = zero(T)
 end
 
-polynomialcf(f, dom::Interval, m::Int) = polynomialcf(Fun(f, Chebyshev(dom)), m)
-polynomialcf(f, dom::Tuple, m::Int) = polynomialcf(f, Interval(dom...), m)
+PolynomialCFOptions(o::PolynomialCFOptions{T}, c::AbstractVector{T}) where {T <: AbstractFloat} = @set o.parity = parity(c)
+PolynomialCFOptions(c::AbstractVector{T}; kwargs...) where {T <: AbstractFloat} = PolynomialCFOptions{T}(; parity = parity(c), kwargs...)
+
+Base.@kwdef struct RationalCFOptions{T <: AbstractFloat}
+    "Even / odd parity of f(x)"
+    parity::Symbol = :generic
+    "Relative tolerance for chopping off small coefficients"
+    rtolchop::T = eps(T)
+    "Absolute tolerance for chopping off small coefficients"
+    atolchop::T = zero(T)
+    "Tolerance for detecting rationality"
+    atolrat::T = 50 * eps(T)
+    "Relative tolerance for FFT deconvolution"
+    rtolfft::T = eps(T)^(2 // 3)
+    "Minimum FFT length"
+    minnfft::Int = 2^8
+    "Maximum FFT length"
+    maxnfft::Int = 2^17
+    "Relative tolerance for detecting ill-conditioning"
+    rtolcond::T = 1e13
+    "Absolute tolerance for detecting ill-conditioning"
+    atolcond::T = 1e3
+    "Suppress warnings"
+    quiet::Bool = false
+end
+
+RationalCFOptions(o::RationalCFOptions{T}, c::AbstractVector{T}) where {T <: AbstractFloat} = @set o.parity = parity(c)
+RationalCFOptions(c::AbstractVector{T}; kwargs...) where {T <: AbstractFloat} = RationalCFOptions{T}(; parity = parity(c), kwargs...)
+
+function polynomialcf(fun::Fun, m::Int, M::Int = ncoefficients(fun) - 1; kwargs...)
+    @assert M + 1 <= ncoefficients(fun) "Requested number of Chebyshev expansion coefficients $(M) exceeds the number of coefficients $(ncoefficients(fun)) of the function"
+    c = coefficients(check_fun(fun))
+    return @views polynomialcf(c[1:M+1], m; kwargs...)
+end
+
+polynomialcf(f, dom::Tuple, m::Int; kwargs...) = polynomialcf(Fun(f, Chebyshev(Interval(dom...))), m; kwargs...)
+polynomialcf(f, m::Int; kwargs...) = polynomialcf(Fun(f), m; kwargs...)
+
+function polynomialcf(c::AbstractVector{T}, m::Int; kwargs...) where {T <: AbstractFloat}
+    return polynomialcf(c, m, PolynomialCFOptions(c; kwargs...))
+end
 
 function rationalcf(fun::Fun, m::Int, n::Int, M::Int = ncoefficients(fun) - 1; kwargs...)
     @assert M + 1 <= ncoefficients(fun) "Requested number of Chebyshev expansion coefficients $(M) exceeds the number of coefficients $(ncoefficients(fun)) of the function"
-    fun = check_fun(fun)
-    c = coefficients(fun)[1:M+1]
-    if m >= M
-        return c, [one(eltype(c))], zero(eltype(c))
-    else
-        return rationalcf(c, m, n; kwargs...)
-    end
+    c = coefficients(check_fun(fun))
+    return @views rationalcf(c[1:M+1], m, n; kwargs...)
 end
 
-rationalcf(f, dom::Interval, m::Int, n::Int; kwargs...) = rationalcf(Fun(f, Chebyshev(dom)), m, n; kwargs...)
-rationalcf(f, dom::Tuple, m::Int, n::Int; kwargs...) = rationalcf(f, Interval(dom...), m, n; kwargs...)
+rationalcf(f, dom::Tuple, m::Int, n::Int; kwargs...) = rationalcf(Fun(f, Chebyshev(Interval(dom...))), m, n; kwargs...)
+rationalcf(f, m::Int, n::Int; kwargs...) = rationalcf(Fun(f), m, n; kwargs...)
 
-function polynomialcf(c::AbstractVector{T}, m::Int) where {T <: AbstractFloat}
-    @assert m <= length(c)
+function rationalcf(c::AbstractVector{T}, m::Int, n::Int; kwargs...) where {T <: AbstractFloat}
+    return rationalcf(c, m, n, RationalCFOptions(c; kwargs...))
+end
+
+function polynomialcf(c::AbstractVector{T}, m::Int, o::PolynomialCFOptions) where {T <: AbstractFloat}
+    @assert !isempty(c) "Chebyshev coefficient vector must be non-empty"
+    @assert 0 <= m "Requested polynomial degree m = $(m) must be non-negative"
+
+    c = lazychopcoeffs(c; rtol = o.rtolchop, atol = o.atolchop)
     M = length(c) - 1
+    m = min(m, M)
 
-    # Trivial case
-    (m == M - 1) && return c[1:M], abs(c[M+1])
+    # Check even / odd symmetries
+    if o.parity === :even
+        m -= isodd(m) # ensure m is even
+        isodd(M) && (M -= 1; c = @views c[1:end-1]) # ensure M is even
+    elseif o.parity === :odd
+        m > 0 && (m -= iseven(m)) # ensure m is odd, or zero
+        M > 0 && iseven(M) && (M -= 1; c = @views c[1:end-1]) # ensure M is odd, or zero
+    end
+
+    # Trivial cases
+    m == M && return c[1:M+1], zero(T)
+    m == M - 1 && return c[1:M], abs(c[M+1])
 
     cm = @views c[m+2:M+1]
     D, V = eigs_hankel(cm; nev = 1)
@@ -90,49 +141,39 @@ function polynomialcf(c::AbstractVector{T}, m::Int) where {T <: AbstractFloat}
     @views b[m+2:2m+1] .+= b[m:-1:1]
     p = @views c[1:m+1] - b[m+1:2m+1]
 
-    return p, s
+    return p, abs(s)
 end
 
-function rationalcf(
-    c::AbstractVector{T},
-    m::Int,
-    n::Int;
-    atolrat = 50 * eps(T),      # Tolerance for detecting rationality
-    rtolfft = eps(T)^(2 // 3),  # Relative tolerance for FFT deconvolution
-    minnfft = 2^8,              # Minimum FFT length
-    maxnfft = 2^17,             # Maximum FFT length
-    rtolcond = 1e13,            # Relative tolerance for detecting ill-conditioning
-    atolcond = 1e3,             # Absolute tolerance for detecting ill-conditioning
-    quiet = false,              # Suppress warnings
-) where {T <: AbstractFloat}
-    @assert m <= length(c)
-    n == 0 && return rationalcf_trivial(c, m)
+function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::RationalCFOptions{T}) where {T <: AbstractFloat}
+    @assert !isempty(c) "Chebyshev coefficient vector must be non-empty"
+    @assert 0 <= m "Requested numerator degree m = $(m) must be non-negative"
+    @assert 0 <= n "Requested denominator degree n = $(n) must be non-negative"
 
+    c = lazychopcoeffs(c; rtol = o.rtolchop, atol = o.atolchop)
     M = length(c) - 1
-    vscale = sum(abs, c) # crude bound on infinity norm of Fun(Chebyshev(), c)
+    m = min(m, M)
+
+    # Check even / odd symmetries
+    if o.parity === :even
+        m -= isodd(m) # ensure m is even
+        n -= isodd(n) # ensure n is even
+        isodd(M) && (M -= 1; c = @views c[1:end-1]) # ensure M is even
+    elseif o.parity === :odd
+        m > 0 && (m -= iseven(m)) # ensure m is odd, or zero
+        n -= isodd(n) # ensure n is even
+        M > 0 && iseven(M) && (M -= 1; c = @views c[1:end-1]) # ensure M is odd, or zero
+    end
+
+    # Trivial cases
+    (n == 0 || m == M) && return rationalcf_reduced(c, m)
 
     # Reorder coeffs and scale T_0 coefficient
     a = copy(c)
     a[1] *= 2
     reverse!(a)
 
-    # Check even / odd symmetries
-    if maximum(abs, @views a[end-1:-2:1]) < vscale * eps(T) # f is even
-        if iseven(m) && iseven(n)
-            m += 1
-        elseif isodd(m) && isodd(n)
-            (n -= 1) == 0 && return rationalcf_trivial(c, m)
-        end
-    elseif maximum(abs, @views a[end:-2:1]) < vscale * eps(T) # f is odd
-        if isodd(m) && iseven(n)
-            m += 1
-        elseif iseven(m) && isodd(n)
-            (n -= 1) == 0 && return rationalcf_trivial(c, m)
-        end
-    end
-
     # Obtain eigenvalues and block structure
-    s, u, k, l, rflag = eigs_hankel_block(a, m, n; tol = atolrat)
+    s, u, k, l, rflag = eigs_hankel_rational(a, m, n; tol = o.atolrat)
     if k > 0 || l > 0
         if rflag
             # f is rational (at least up to machine precision)
@@ -140,18 +181,18 @@ function rationalcf(
             return p, q, eps(T)
         end
 
-        nnew = n - k
-        s, u, knew, lnew, _ = eigs_hankel_block(a, m + l, nnew; tol = atolrat)
-        if knew > 0 || lnew > 0
+        n′ = n - k
+        s, u, k′, l′, _ = eigs_hankel_rational(a, m + l, n′; tol = o.atolrat)
+        if k′ > 0 || l′ > 0
             n = n + l
-            s, u, k, l, _ = eigs_hankel_block(a, m - k, n; tol = atolrat)
+            s, u, k, l, _ = eigs_hankel_rational(a, m - k, n; tol = o.atolrat)
         else
-            n = nnew
+            n = n′
         end
     end
 
     # Obtain polynomial q from Laurent coefficients using FFT
-    N = max(nextpow(2, length(u)), minnfft)
+    N = max(nextpow(2, length(u)), o.minnfft)
     ud = polyder(u)
     ac = deconv(ud, u, N)
     while true
@@ -159,7 +200,7 @@ function rationalcf(
         ac_last = ac
         ac = deconv(ud, u, N)
         diff = @views reldiff(ac[end-n:end-1], ac_last[end-n:end-1])
-        (diff <= rtolfft || N >= maxnfft) && break
+        (diff <= o.rtolfft || N >= o.maxnfft) && break
     end
 
     b = ones(T, n + 1)
@@ -171,7 +212,7 @@ function rationalcf(
     z = polyroots(b)
     zmax = maximum(abs, z)
     if zmax > 1
-        !quiet && @warn "Ill-conditioning detected. Results may be inaccurate"
+        !o.quiet && @warn "Ill-conditioning detected. Results may be inaccurate"
         filter!(zi -> abs(zi) < 1, z)
         zmax = maximum(abs, z)
     end
@@ -186,7 +227,7 @@ function rationalcf(
 
     # Compute Chebyshev coefficients of approximation Rt from Laurent coefficients
     # of Blaschke product using FFT
-    N = max(nextpow(2, length(u)), minnfft)
+    N = max(nextpow(2, length(u)), o.minnfft)
     v = reverse(u)
 
     ac = deconv(u, v, N, M)
@@ -196,7 +237,7 @@ function rationalcf(
         ac = deconv(u, v, N, M)
         diff1 = @views reldiff(ac[1:m+1], ac_last[1:m+1])
         diff2 = @views m == 0 ? T(Inf) : reldiff(ac[end-m+1:end], ac_last[end-m+1:end])
-        (diff1 <= rtolfft || diff2 <= rtolfft || N >= maxnfft) && break
+        (diff1 <= o.rtolfft || diff2 <= o.rtolfft || N >= o.maxnfft) && break
     end
 
     ac .*= s
@@ -225,8 +266,8 @@ function rationalcf(
     C = @views Γ[1:m, end:-1:m+2]
     G = Hermitian(A + C - (2 / γ₀) * (B * B'))
 
-    if cond(G) > max(s * rtolcond, atolcond)
-        !quiet && @warn "Ill-conditioning detected. Results may be inaccurate"
+    if cond(G) > max(s * o.rtolcond, o.atolcond)
+        !o.quiet && @warn "Ill-conditioning detected. Results may be inaccurate"
     end
 
     bc = @views G \ (-2 * ((ct[1] / γ₀) * B - ct[m+1:-1:2]))
@@ -236,7 +277,7 @@ function rationalcf(
     return p, q, s
 end
 
-function rationalcf_trivial(c::AbstractVector, m::Int)
+function rationalcf_reduced(c::AbstractVector, m::Int)
     p, s = polynomialcf(c, m)
     return p, [one(eltype(c))], abs(s)
 end
@@ -248,7 +289,7 @@ function pade(c::AbstractVector{T}, m, n) where {T <: AbstractFloat}
     # Get the Chebyshev coefficients and pad if necessary
     if M < m + 2n
         # Chebfun implementation notes that using random values may be more stable than using zeros?
-        # This doesn't seem worth the non-determinism to me
+        # This doesn't seem worth the non-determinism to me...
         # a = [c; eps(T) * randn(T, m + 2n - M)]
         a = [c; zeros(T, m + 2n + M, 1)]
     else
@@ -358,20 +399,22 @@ function eigs_hankel(c::AbstractVector{T}; nev = 1) where {T <: AbstractFloat}
     # Declaring variable types helps inference since `eigs` is not type-stable,
     # and `eigen` may not be type-stable for e.g. BigFloat
     local D::Vector{T}, V::Matrix{T}
-    m = length(c)
+    nc = length(c)
     A = hankel(c)
 
-    if m >= 32 && T <: Union{Float32, Float64}
-        D, V = eigs(A; nev = nev, which = :LM, v0 = ones(T, m) ./ m)
-        return convert(Vector{T}, D), convert(Matrix{T}, V)
+    if nc >= 32 && T <: Union{Float32, Float64}
+        D, V = eigs(A; nev, which = :LM, v0 = ones(T, nc) ./ nc)
+        D, V = convert(Vector{T}, D), convert(Matrix{T}, V)
     else
         D, V = eigen(A)
         I = partialsortperm(D, 1:nev; by = abs, rev = true)
-        return D[I], V[:, I]
+        D, V = D[I], V[:, I]
     end
+
+    return D, V
 end
 
-function eigs_hankel_block(a::AbstractVector{T}, m, n; tol = 50 * eps(T)) where {T <: AbstractFloat}
+function eigs_hankel_rational(a::AbstractVector{T}, m, n; tol = 50 * eps(T)) where {T <: AbstractFloat}
     # Each Hankel matrix corresponds to one diagonal m - n = const in the CF-table;
     # when a diagonal intersects a square block, the eigenvalues on the
     # intersection are all equal. k and l tell you how many entries on the
@@ -379,14 +422,14 @@ function eigs_hankel_block(a::AbstractVector{T}, m, n; tol = 50 * eps(T)) where 
     # u is the corresponding eigenvector
     M = length(a) - 1
 
-    if n > M + m + 1
-        c = [zeros(T, n - (M + m + 1)); a[(M+1).-abs.(-M:M)]]
+    if m - n + 1 < -M
+        c = [zeros(T, -(m - n + 1) - M); a[(M+1).-abs.(-M:M)]]
     else
         c = a[(M+1).-abs.(m-n+1:M)]
     end
 
     nev = min(n + 10, length(c))
-    D, V = eigs_hankel(c; nev = nev)
+    D, V = eigs_hankel(c; nev)
 
     s = D[n+1]
     u = V[:, n+1]
@@ -415,7 +458,7 @@ function check_endpoints(dom::Tuple)
     @assert all(isfinite, dom) "Domain must be finite"
     return promote(float.(dom)...)
 end
-check_endpoints(dom::Interval) = check_endpoints(endpoints(dom))
+check_endpoints(dom::Union{Interval, ChebyshevInterval}) = check_endpoints(endpoints(dom))
 check_endpoints(fun::Fun) = check_endpoints(domain(fun))
 
 function check_fun(fun::Fun)
@@ -445,6 +488,8 @@ reldiff(x::AbstractVector, y::AbstractVector) = mapreduce(reldiff, max, x, y)
 #### Polynomial utilities
 
 function poly(c::AbstractVector{T}, dom::Union{NTuple{2, T}, Nothing} = nothing; transplant = dom !== nothing) where {T}
+    # Convert a vector of Chebyshev coefficients to a vector of monomial coefficients,
+    # optionally linearly transplanted to a new domain.
     @assert !(transplant && dom === nothing) "Domain must be specified when transplanting"
     Q = Polynomials.ChebyshevT{T, :x}(c) # polynomial in Chebyshev basis on [-1, 1]
     P = convert(Polynomial{T, :x}, Q) # polynomial in monomial basis on [-1, 1]
@@ -462,5 +507,33 @@ polyder(p::Polynomial) = Polynomials.coeffs(Polynomials.derivative(p))
 
 polyroots(c::AbstractVector) = polyroots(Polynomial(c))
 polyroots(p::Polynomial) = complex(Polynomials.roots(p))
+
+function parity(c::AbstractVector{T}) where {T <: AbstractFloat}
+    length(c) <= 1 && return :even # constant function
+    scale = vscale(c)
+    scale == zero(T) && return :even
+    oddscale = @views vscale(c[1:2:end])
+    oddscale <= eps(T) * scale && return :odd
+    evenscale = @views vscale(c[2:2:end])
+    evenscale <= eps(T) * scale && return :even
+    return :generic
+end
+parity(fun::Fun) = parity(coefficients(fun))
+
+# Chop small coefficients from the end of a Chebyshev series
+function lazychopcoeffs(c::AbstractVector{T}; rtol::T = eps(T), atol::T = zero(T)) where {T <: AbstractFloat}
+    scale = vscale(c)
+    l = length(c)
+    while l > 1 && abs(c[l]) <= max(rtol * scale, atol)
+        l -= 1
+    end
+    return @views c[1:l]
+end
+chopcoeffs(c::AbstractVector; kwargs...) = collect(lazychopcoeffs(c; kwargs...))
+chopcoeffs(fun::Fun; kwargs...) = Fun(space(fun), chopcoeffs(coefficients(fun); kwargs...))
+
+# Crude bound on infinity norm of `fun`
+vscale(fun::Fun) = vscale(coefficients(fun))
+vscale(c::AbstractVector{T}) where {T <: AbstractFloat} = sum(abs, c; init = zero(T))
 
 end # module CaratheodoryFejerApprox
