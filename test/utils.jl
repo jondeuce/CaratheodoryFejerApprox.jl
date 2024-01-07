@@ -1,7 +1,8 @@
 using CaratheodoryFejerApprox
 
 using ApproxFun: Chebyshev, Fun, Interval
-using CaratheodoryFejerApprox: parity, check_endpoints
+using CaratheodoryFejerApprox: check_endpoints, lazychopcoeffs, parity
+using Statistics: mean
 
 rand_uniform(a::T, b::T) where {T} = a + (b - a) * rand(T)
 rand_uniform(a::T, b::T, n::Int) where {T} = a .+ (b - a) .* rand(T, n)
@@ -19,8 +20,25 @@ build_fun(dom::Tuple = (-1, 1)) = a -> build_fun(a, dom)
 normalize_rat(p::AbstractVector, q::AbstractVector) = p ./ q[1], q ./ q[1]
 normalize_rat((p, q)::Tuple) = normalize_rat(p, q)
 
-isevenparity(f) = parity(f) === :even
-isoddparity(f) = parity(f) === :odd
+function compare_chebcoeffs(a1::AbstractVector{T}, a2::AbstractVector{T}; atol, rtol, parity = :generic) where {T <: AbstractFloat}
+    # Compare Chebyshev coefficients of two polynomials
+    c1, c2 = lazychopcoeffs(a1; parity), lazychopcoeffs(a2; parity)
+    length(c1) == length(c2) || return false
+    @views if parity === :even
+        pass1 = length(c1) <= 1 || maximum(abs, c1[2:2:end]) <= rtol * sum(abs, c1)
+        pass2 = length(c2) <= 1 || maximum(abs, c2[2:2:end]) <= rtol * sum(abs, c2)
+        pass3 = isapprox(c1[1:2:end], c2[1:2:end]; atol, rtol)
+        pass = pass1 && pass2 && pass3
+    elseif parity === :odd
+        pass1 = length(c1) <= 1 || maximum(abs, c1[1:2:end]) <= rtol * sum(abs, c1)
+        pass2 = length(c2) <= 1 || maximum(abs, c2[1:2:end]) <= rtol * sum(abs, c2)
+        pass3 = isapprox(c1[2:2:end], c2[2:2:end]; atol, rtol)
+        pass = pass1 && pass2 && pass3
+    else
+        pass = isapprox(c1, c2; atol, rtol)
+    end
+    return pass
+end
 
 function rand_chebcoeffs(::Type{T} = Float64; n::Int = 100, min = eps(T), even = nothing) where {T <: AbstractFloat}
     # Random exponentially decaying coefficients such that |c[n]| ~ eps(T)

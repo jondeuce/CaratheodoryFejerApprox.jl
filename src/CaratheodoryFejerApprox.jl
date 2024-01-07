@@ -93,7 +93,7 @@ function polynomialcf(c::AbstractVector{T}, m::Int, o::CFOptions) where {T <: Ab
     @assert !isempty(c) "Chebyshev coefficient vector must be non-empty"
     @assert 0 <= m "Requested polynomial degree m = $(m) must be non-negative"
 
-    c = lazychopcoeffs(c; rtol = o.rtolchop, atol = o.atolchop) # view of non-trivial coefficients
+    c = lazychopcoeffs(c; rtol = o.rtolchop, atol = o.atolchop) # view of non-negligible coefficients
     M = length(c) - 1
     m = min(m, M)
 
@@ -131,7 +131,7 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
     @assert 0 <= m "Requested numerator degree m = $(m) must be non-negative"
     @assert 0 <= n "Requested denominator degree n = $(n) must be non-negative"
 
-    c = lazychopcoeffs(c; rtol = o.rtolchop, atol = o.atolchop) # view of non-trivial coefficients
+    c = lazychopcoeffs(c; rtol = o.rtolchop, atol = o.atolchop) # view of non-negligible coefficients
     M = length(c) - 1
     m = min(m, M)
 
@@ -164,7 +164,7 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
     reverse!(a)
 
     # Obtain eigenvalues and block structure
-    s, u, k, l, rflag = eigs_hankel_block(a, m, n; tol = o.atolrat)
+    s, u, k, l, rflag = eigs_hankel_block(a, m, n; atol = o.atolrat)
     if k > 0 || l > 0
         if rflag
             # f is rational (at least up to machine precision)
@@ -173,10 +173,10 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
         end
 
         n′ = n - k
-        s, u, k′, l′, _ = eigs_hankel_block(a, m + l, n′; tol = o.atolrat)
+        s, u, k′, l′, _ = eigs_hankel_block(a, m + l, n′; atol = o.atolrat)
         if k′ > 0 || l′ > 0
             n = n + l
-            s, u, k, l, _ = eigs_hankel_block(a, m - k, n; tol = o.atolrat)
+            s, u, k, l, _ = eigs_hankel_block(a, m - k, n; atol = o.atolrat)
         else
             n = n′
         end
@@ -430,7 +430,7 @@ function eigs_hankel(c::AbstractVector{T}; nev = 1) where {T <: AbstractFloat}
     return D, V
 end
 
-function eigs_hankel_block(a::AbstractVector{T}, m, n; tol = 50 * eps(T)) where {T <: AbstractFloat}
+function eigs_hankel_block(a::AbstractVector{T}, m, n; atol = 50 * eps(T)) where {T <: AbstractFloat}
     # Each Hankel matrix corresponds to one diagonal m - n = const in the CF-table;
     # when a diagonal intersects a square block, the eigenvalues on the
     # intersection are all equal. k and l tell you how many entries on the
@@ -451,12 +451,12 @@ function eigs_hankel_block(a::AbstractVector{T}, m, n; tol = 50 * eps(T)) where 
     u = V[:, n+1]
 
     k = 0
-    while k < n && abs(abs(D[n-k]) - abs(s)) < tol
+    while k < n && abs(abs(D[n-k]) - abs(s)) < atol
         k += 1
     end
 
     l = 0
-    while n + l + 2 < nev && abs(abs(D[n+l+2]) - abs(s)) < tol
+    while n + l + 2 < nev && abs(abs(D[n+l+2]) - abs(s)) < atol
         l += 1
     end
 
@@ -524,26 +524,30 @@ polyder(p::Polynomial) = Polynomials.coeffs(Polynomials.derivative(p))
 polyroots(c::AbstractVector) = polyroots(Polynomial(c))
 polyroots(p::Polynomial) = complex(Polynomials.roots(p))
 
-function parity(c::AbstractVector{T}) where {T <: AbstractFloat}
+function parity(c::AbstractVector{T}; rtol = eps(T)) where {T <: AbstractFloat}
     length(c) <= 1 && return :even # constant function
     scale = vscale(c)
     scale == zero(T) && return :even
     oddscale = @views vscale(c[1:2:end])
-    oddscale <= eps(T) * scale && return :odd
+    oddscale <= rtol * scale && return :odd
     evenscale = @views vscale(c[2:2:end])
-    evenscale <= eps(T) * scale && return :even
+    evenscale <= rtol * scale && return :even
     return :generic
 end
-parity(fun::Fun) = parity(coefficients(fun))
+parity(fun::Fun; kwargs...) = parity(coefficients(fun); kwargs...)
 
 # Chop small coefficients from the end of a Chebyshev series
-function lazychopcoeffs(c::AbstractVector{T}; rtol::T = eps(T), atol::T = zero(T)) where {T <: AbstractFloat}
+function lazychopcoeffs(c::AbstractVector{T}; rtol::T = eps(T), atol::T = zero(T), parity = :generic) where {T <: AbstractFloat}
     scale = vscale(c)
     l = length(c)
     while l > 1 && abs(c[l]) <= max(rtol * scale, atol)
         l -= 1
     end
-    return @views c[1:l]
+    if parity === :even || parity === :odd
+        return @views lazyparitychop(c[1:l], parity)
+    else
+        return @views c[1:l]
+    end
 end
 chopcoeffs(c::AbstractVector; kwargs...) = collect(lazychopcoeffs(c; kwargs...))
 chopcoeffs(fun::Fun; kwargs...) = Fun(space(fun), chopcoeffs(coefficients(fun); kwargs...))

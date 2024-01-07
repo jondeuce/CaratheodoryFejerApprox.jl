@@ -24,13 +24,15 @@ LinearAlgebra = "1"
 MATLAB = "0.8"
 Polynomials = "4"
 Setfield = "1"
+Statistics = "1"
 Test = "1"
 julia = "1.6"
 
 [extras]
 Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
 MATLAB = "10e44e05-a98a-55b3-a45b-ba969058deb6"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["Aqua", "MATLAB", "Test"]
+test = ["Aqua", "MATLAB", "Statistics", "Test"]

@@ -21,17 +21,9 @@ function [out] = benchmark(fun, dmax, parity)
         for m = d:-1:0
             n = d - m;
 
-            % Note: there is a bug in the chebfun's cf.m that causes it to sometimes fail
-            % for even/odd symmetric functions m/n are not of the appropriate parity
-            switch parity
-                case 'even'
-                    if ~(mod(m, 2) == 0 && mod(n, 2) == 0)
-                        continue
-                    end
-                case 'odd'
-                    if ~(mod(m, 2) == 1 && mod(n, 2) == 0)
-                        continue
-                    end
+            % Note: there is a bug in the chebfun/cf.m for even/odd symmetric functions when n = 1
+            if n == 1 && (strcmpi(parity, 'even') || strcmpi(parity, 'odd'))
+                n = 0;
             end
 
             [p, q, r, s] = cf(fun, m, n);
