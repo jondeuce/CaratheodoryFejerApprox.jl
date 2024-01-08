@@ -34,7 +34,7 @@ module CaratheodoryFejerApprox
 
 using ApproxFun: ApproxFun, Chebyshev, ChebyshevInterval, Fun, Interval, coefficients, domain, endpoints, ncoefficients, space
 using Arpack: Arpack, eigs
-using FFTW: FFTW, rfft, irfft
+using FFTW: FFTW, irfft, rfft
 using GenericFFT: GenericFFT, GenericFFT # defines generic methods for FFTs
 using GenericLinearAlgebra: GenericLinearAlgebra, GenericLinearAlgebra # defines generic method for `LinearAlgebra.eigen` and `Polynomials.roots`
 using LinearAlgebra: LinearAlgebra, Hermitian, cond, dot, eigen
@@ -57,7 +57,7 @@ Base.@kwdef struct CFOptions{T <: AbstractFloat}
     "Minimum FFT length"
     minnfft::Int = 2^8
     "Maximum FFT length"
-    maxnfft::Int = 2^17
+    maxnfft::Int = 2^20
     "Relative tolerance for detecting ill-conditioning"
     rtolcond::T = 1e13
     "Absolute tolerance for detecting ill-conditioning"
@@ -185,18 +185,17 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
     # Obtain polynomial q from Laurent coefficients using FFT
     N = max(nextpow(2, length(u)), o.minnfft)
     ud = polyder(u)
-    ac = deconv(ud, u, N)
+    bc = zeros(T, n)
+    bc_prev = copy(bc)
     while true
-        N *= 2
-        ac_last = ac
-        ac = deconv(ud, u, N)
-        diff = @views reldiff(ac[end-n:end-1], ac_last[end-n:end-1])
-        (diff <= o.rtolfft || N >= o.maxnfft) && break
+        bc_prev, bc = bc, bc_prev
+        @views bc .= incomplete_poly_fact_laurent_coeffs(u, ud, N)[end-n:end-1]
+        ((N *= 2) > o.maxnfft || isapprox(bc, bc_prev; rtol = o.rtolfft)) && break
     end
 
     b = ones(T, n + 1)
     for j in 1:n
-        b[j+1] = @views -dot(b[1:j], ac[end-j:end-1]) / j
+        b[j+1] = @views -dot(b[1:j], bc[end-j+1:end]) / j
     end
     reverse!(b)
 
@@ -219,20 +218,18 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
     # Compute Chebyshev coefficients of approximation Rt from Laurent coefficients
     # of Blaschke product using FFT
     N = max(nextpow(2, length(u)), o.minnfft)
-    v = reverse(u)
-
-    ac = deconv(u, v, N, M)
+    ac = zeros(T, m + 1) # symmetrized Laurent coefficients of Rt: [2*a₀, a₁ + a₋₁, ..., aₘ + a₋ₘ]
+    ac_prev = copy(ac)
     while true
-        N *= 2
-        ac_last = ac
-        ac = deconv(u, v, N, M)
-        diff1 = @views reldiff(ac[1:m+1], ac_last[1:m+1])
-        diff2 = @views m == 0 ? T(Inf) : reldiff(ac[end-m+1:end], ac_last[end-m+1:end])
-        (diff1 <= o.rtolfft || diff2 <= o.rtolfft || N >= o.maxnfft) && break
+        ac_prev, ac = ac, ac_prev
+        ac_full = blaschke_laurent_coeffs(u, N, M) # Laurent coefficients of Rt: [a₀, a₁, ..., aₖ₋₁, a₋ₖ, ..., a₋₁] where k = N ÷ 2
+        @views ac .= ac_full[1:m+1]
+        @views ac[2:end] .+= ac_full[end:-1:end-m+1]
+        ac[1] *= 2
+        ((N *= 2) > o.maxnfft || isapprox(ac, ac_prev; rtol = o.rtolfft)) && break
     end
 
-    ac .*= s
-    ct = @views a[end:-1:end-m] .- ac[1:m+1] .- [ac[1]; ac[end:-1:end-m+1]]
+    ct = @views a[end:-1:end-m] .- s .* ac # (eqn. 1.7b)
     s = abs(s)
 
     # Compute numerator polynomial from Chebyshev expansion of 1/q and Rt. We
@@ -354,16 +351,31 @@ end
 
 #### Linear algebra utilities
 
-function deconv(a::AbstractVector, b::AbstractVector, N::Int, M::Union{Int, Nothing} = nothing)
-    â, b̂ = rfft(zeropad(float(a), N)), rfft(zeropad(float(b), N))
-    if M === nothing
-        ĉ = @. â / b̂
-    else
-        T = typeof(one(eltype(a)) / one(eltype(b)))
-        θ = (2M // N) * (T(0):T(N ÷ 2))
-        ĉ = @. cispi(-θ) * â / b̂
-    end
-    return irfft(ĉ, N)
+function blaschke_laurent_coeffs(u::AbstractVector{T}, N::Int, M::Int) where {T <: AbstractFloat}
+    # Compute Laurent coefficients of the quotient of Blaschke products:
+    #   b(z) = z^M * P(z) / Q(z)
+    #        = z^M * (∑_{k=0}^{d-1} u_k z^k) / (∑_{k=0}^{d-1} u_{d-k-1} z^k).
+    # To efficiently evaluate b(z) for many z on the unit circle, u is padded u with
+    # zeros to length N and the numerator is computed using the FFT. Additionally,
+    # we save an FFT by using shift/reflect FFT identities to compute the denominator.
+    d = length(u)
+    û = rfft(zeropad(u, N))
+    θ = (2 * (M - d + 1) // N) * (T(0):T(N ÷ 2))
+    b̂ = @. cispi(-θ) * z_div_conj_z(û)
+    return irfft(b̂, N)
+end
+
+function incomplete_poly_fact_laurent_coeffs(u::AbstractVector{T}, du::AbstractVector{T}, N::Int) where {T <: AbstractFloat}
+    û = rfft(zeropad(u, N))
+    dû = rfft(zeropad(du, N))
+    return irfft(dû ./ û, N)
+end
+
+@inline function z_div_conj_z(z::Complex)
+    # Efficiently and safely compute z / conj(z). Returns 1 if z == 0.
+    a, b = reim(z)
+    r² = a^2 + b^2
+    return ifelse(r² == 0, one(z), Complex((a - b) * (a + b), 2 * a * b) / r²)
 end
 
 function conv(a::AbstractVector, b::AbstractVector)
@@ -497,9 +509,6 @@ end
 function cropto(x::AbstractVector, n::Int)
     return n >= length(x) ? x : x[1:n]
 end
-
-reldiff(x::Number, y::Number) = abs((x - y) / x)
-reldiff(x::AbstractVector, y::AbstractVector) = mapreduce(reldiff, max, x, y)
 
 #### Polynomial utilities
 
