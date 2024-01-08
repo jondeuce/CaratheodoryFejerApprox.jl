@@ -40,6 +40,7 @@ using GenericLinearAlgebra: GenericLinearAlgebra, GenericLinearAlgebra # defines
 using LinearAlgebra: LinearAlgebra, Hermitian, cond, dot, eigen
 using Polynomials: Polynomials, Polynomial
 using Setfield: @set
+using Statistics: mean, std
 
 export polynomialcf, rationalcf
 
@@ -270,6 +271,33 @@ function rationalcf_reduced(c::AbstractVector, m::Int, o::CFOptions)
     return p, [one(eltype(c))], abs(s)
 end
 
+function cleanup_coeffs(p::AbstractVector{T}, o::CFOptions{T}) where {T <: AbstractFloat}
+    # Clean up even/odd symmetric coefficients
+    p = paritychop(p, o.parity)
+    if o.parity === :even
+        @views p[2:2:end] .= zero(T)
+    elseif o.parity === :odd
+        @views p[1:2:end] .= zero(T)
+    end
+    return p
+end
+
+function cleanup_coeffs(p::AbstractVector{T}, q::AbstractVector{T}, o::CFOptions{T}) where {T <: AbstractFloat}
+    # Clean up even/odd symmetric coefficients
+    if o.parity === :even
+        p, q = paritychop(p, :even), paritychop(q, :even)
+        @views p[2:2:end] .= zero(T) # even
+        @views q[2:2:end] .= zero(T) # even
+    elseif o.parity === :odd
+        p, q = paritychop(p, :odd), paritychop(q, :even)
+        @views p[1:2:end] .= zero(T) # odd
+        @views q[2:2:end] .= zero(T) # even
+    end
+    return p, q
+end
+
+#### Pade
+
 function pade(c::AbstractVector{T}, m, n) where {T <: AbstractFloat}
     M = length(c) - 1
     l = max(m, n) # temporary degree variable in case m < n
@@ -324,29 +352,151 @@ function pade(c::AbstractVector{T}, m, n) where {T <: AbstractFloat}
     return p, q
 end
 
-function cleanup_coeffs(p::AbstractVector{T}, o::CFOptions{T}) where {T <: AbstractFloat}
-    # Clean up even/odd symmetric coefficients
-    p = paritychop(p, o.parity)
-    if o.parity === :even
-        @views p[2:2:end] .= zero(T)
-    elseif o.parity === :odd
-        @views p[1:2:end] .= zero(T)
-    end
-    return p
+#### Minimax
+
+Base.@kwdef struct MinimaxOptions{T}
+    "Relative tolerance for detecting convergence"
+    rtol::T = √eps(T)
+    "Absolute tolerance for detecting convergence"
+    atol::T = 5*eps(T)
+    "Maximum number of iterations"
+    maxiter::Int = 25
 end
 
-function cleanup_coeffs(p::AbstractVector{T}, q::AbstractVector{T}, o::CFOptions{T}) where {T <: AbstractFloat}
-    # Clean up even/odd symmetric coefficients
-    if o.parity === :even
-        p, q = paritychop(p, :even), paritychop(q, :even)
-        @views p[2:2:end] .= zero(T) # even
-        @views q[2:2:end] .= zero(T) # even
-    elseif o.parity === :odd
-        p, q = paritychop(p, :odd), paritychop(q, :even)
-        @views p[1:2:end] .= zero(T) # odd
-        @views q[2:2:end] .= zero(T) # even
+function minimax(fun::Fun, m::Int, n::Int; kwargs...)
+    p₀, q₀, _ = rationalcf(fun, m, n)
+    p, q, ε = minimax(fun, p₀, q₀; kwargs...)
+    return p, q, ε
+end
+minimax(fun::Fun, pq::AbstractVector{T}...; kwargs...) where {T <: AbstractFloat} = minimax(coefficients(fun), pq...; kwargs...)
+minimax(f::AbstractVector{T}, pq::AbstractVector{T}...; kwargs...) where {T <: AbstractFloat} = minimax(f, pq..., MinimaxOptions{T}(; kwargs...))
+
+minimax(f, dom::Tuple, m::Int, n::Int; kwargs...) = minimax(Fun(f, Chebyshev(Interval(dom...))), m, n; kwargs...)
+minimax(f, m::Int, n::Int; kwargs...) = minimax(Fun(f), m, n; kwargs...)
+
+function minimax(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T}) where {T <: AbstractFloat}
+    if length(p) <= 1
+        lo, hi = extrema(Fun(Chebyshev(), f))
+        return [(lo + hi) / 2], (hi - lo) / 2
     end
-    return p, q
+    m = length(p) - 1
+    p = copy(p)
+    δf = copy(f)
+    δF = Fun(Chebyshev(), δf)
+    x = zeros(T, m + 2)
+    x[begin] = -one(T)
+    x[end] = one(T)
+    δFₓ, Eₓ, Sₓ = (zero(x) for _ in 1:3)
+    J = zeros(T, m + 2, m + 2)
+
+    iter = 0
+    @views while true
+        # Compute new local extrema
+        @. δf[1:m+1] = f[1:m+1] - p
+        x₀ = ApproxFun.roots(ApproxFun.differentiate(δF))
+        nx₀ = length(x₀)
+        if nx₀ != m
+            iter == 0 && @warn "Initial polynomial is not a good enough approximant for initializing minimax"
+            @warn "Found $nx₀ local extrema, but expected $m"
+            return p, T(NaN)
+        end
+
+        @. x[2:m+1] = x₀
+        @. δFₓ = δF(x) # Note: (F - P)(x) is much more accurate than F(x) - P(x)
+        @. Eₓ = abs(δFₓ) # error at each root
+        @. Sₓ = sign(δFₓ) # sign of error at each root
+
+        ε, σε = mean(Eₓ), std(Eₓ; corrected = false)
+        if iter >= o.maxiter || (σε <= max(o.rtol * ε, o.atol) && all(Sₓ[i] == -Sₓ[i+1] for i in 1:length(Sₓ)-1))
+            return p, ε
+        end
+
+        @. J[:, 1] = one(T)
+        if m >= 1
+            @. J[:, 2] = x
+        end
+        for j in 3:m+1
+            @. J[:, j] = 2x * J[:, j-1] - J[:, j-2]
+        end
+        @. J[:, m+2] = Sₓ
+
+        rhs = @. δFₓ - ε * Sₓ
+        δp_δε = J \ rhs
+        δp = δp_δε[1:m+1]
+        δε = δp_δε[m+2]
+        @. p += δp
+        iter += 1
+    end
+end
+
+function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T}, o::MinimaxOptions{T}) where {T <: AbstractFloat}
+    if length(q) <= 1
+        p, ε = minimax(f, p, o)
+        return p, [one(T)], ε
+    end
+    m, n = length(p) - 1, length(q) - 1
+    p, q = copy(p), copy(q)
+    p ./= q[1]
+    q ./= q[1]
+    F = Fun(Chebyshev(), f)
+    P = Fun(Chebyshev(), p)
+    Q = Fun(Chebyshev(), q)
+    x = zeros(T, m + n + 2)
+    x[begin] = -one(T)
+    x[end] = one(T)
+    δFₓ, Fₓ, Qₓ, Eₓ, Sₓ = (zero(x) for _ in 1:5)
+    J = zeros(T, m + n + 2, m + n + 2)
+
+    iter = 0
+    @views while true
+        # Compute new local extrema
+        δF = F - P / Q
+        x₀ = ApproxFun.roots(ApproxFun.differentiate(δF))
+        nx₀ = length(x₀)
+        if nx₀ != m + n
+            iter == 0 && @warn "Initial polynomial is not a good enough approximant for initializing minimax"
+            @warn "Found $nx₀ local extrema, but expected $m"
+            return p, q, T(NaN)
+        end
+
+        @. x[2:m+n+1] = x₀
+        @. δFₓ = δF(x) # Note: (F - P)(x) is much more accurate than F(x) - P(x)
+        @. Fₓ = F(x)
+        @. Qₓ = Q(x)
+        @. Eₓ = abs(δFₓ) # error at each root
+        @. Sₓ = sign(δFₓ) # sign of error at each root
+
+        ε, σε = mean(Eₓ), std(Eₓ; corrected = false)
+        if iter >= o.maxiter || (σε <= max(o.rtol * ε, o.atol) && all(Sₓ[i] == -Sₓ[i+1] for i in 1:length(Sₓ)-1))
+            return p, q, ε
+        end
+
+        @. J[:, 1] = one(T)
+        if m >= 1
+            @. J[:, 2] = x
+        end
+        for j in 3:m+1
+            @. J[:, j] = 2x * J[:, j-1] - J[:, j-2]
+        end
+        @. J[:, m+2] = x
+        if n >= 2
+            @. J[:, m+3] = 2x^2 - 1
+        end
+        for j in m+4:m+n+1
+            @. J[:, j] = 2x * J[:, j-1] - J[:, j-2]
+        end
+        @. J[:, m+2:m+n+1] *= (ε * Sₓ - Fₓ)
+        @. J[:, m+n+2] = Sₓ * Qₓ
+
+        rhs = @. Qₓ * (δFₓ - ε * Sₓ)
+        δp_δq_δε = J \ rhs
+        δp = δp_δq_δε[1:m+1]
+        δq = δp_δq_δε[m+2:m+n+1]
+        δε = δp_δq_δε[m+n+2]
+        @. p += δp
+        @. q[2:n+1] += δq
+        iter += 1
+    end
 end
 
 #### Linear algebra utilities
