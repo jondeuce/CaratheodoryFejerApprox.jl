@@ -35,12 +35,13 @@ module CaratheodoryFejerApprox
 using ApproxFun: ApproxFun, Chebyshev, ChebyshevInterval, Fun, Interval, coefficients, domain, endpoints, ncoefficients, space
 using Arpack: Arpack, eigs
 using FFTW: FFTW, irfft, rfft
-using GenericFFT: GenericFFT, GenericFFT # defines generic methods for FFTs
-using GenericLinearAlgebra: GenericLinearAlgebra, GenericLinearAlgebra # defines generic method for `LinearAlgebra.eigen` and `Polynomials.roots`
-using LinearAlgebra: LinearAlgebra, Hermitian, cond, dot, eigen
+using GenericFFT: GenericFFT # defines generic methods for FFTs
+using GenericLinearAlgebra: GenericLinearAlgebra # defines generic method for `LinearAlgebra.eigen` and `Polynomials.roots`
+using LinearAlgebra: LinearAlgebra, Hermitian, cond, dot, eigen, ldiv!, mul!, qr!
 using Polynomials: Polynomials, Polynomial
-using Setfield: @set
-using Statistics: mean, std
+using Setfield: Setfield, @set
+using Statistics: Statistics, mean, std
+using ToeplitzMatrices: ToeplitzMatrices, Toeplitz, Hankel
 
 export polynomialcf, rationalcf
 
@@ -70,21 +71,13 @@ end
 CFOptions(o::CFOptions{T}, c::AbstractVector{T}) where {T <: AbstractFloat} = @set o.parity = parity(c)
 CFOptions(c::AbstractVector{T}; kwargs...) where {T <: AbstractFloat} = CFOptions{T}(; parity = parity(c), kwargs...)
 
-function polynomialcf(fun::Fun, m::Int, M::Int = ncoefficients(fun) - 1; kwargs...)
-    @assert M + 1 <= ncoefficients(fun) "Requested number of Chebyshev expansion coefficients $(M) exceeds the number of coefficients $(ncoefficients(fun)) of the function"
-    c = coefficients(check_fun(fun))
-    return @views polynomialcf(c[1:M+1], m; kwargs...)
-end
+polynomialcf(fun::Fun, m::Int; kwargs...) = polynomialcf(coefficients(check_fun(fun)), m; kwargs...)
 polynomialcf(c::AbstractVector{<:AbstractFloat}, m::Int; kwargs...) = polynomialcf(c, m, CFOptions(c; kwargs...))
 
 polynomialcf(f, dom::Tuple, m::Int; kwargs...) = polynomialcf(Fun(f, Chebyshev(Interval(dom...))), m; kwargs...)
 polynomialcf(f, m::Int; kwargs...) = polynomialcf(Fun(f), m; kwargs...)
 
-function rationalcf(fun::Fun, m::Int, n::Int, M::Int = ncoefficients(fun) - 1; kwargs...)
-    @assert M + 1 <= ncoefficients(fun) "Requested number of Chebyshev expansion coefficients $(M) exceeds the number of coefficients $(ncoefficients(fun)) of the function"
-    c = coefficients(check_fun(fun))
-    return @views rationalcf(c[1:M+1], m, n; kwargs...)
-end
+rationalcf(fun::Fun, m::Int, n::Int; kwargs...) = rationalcf(coefficients(check_fun(fun)), m, n; kwargs...)
 rationalcf(c::AbstractVector{<:AbstractFloat}, m::Int, n::Int; kwargs...) = rationalcf(c, m, n, CFOptions(c; kwargs...))
 
 rationalcf(f, dom::Tuple, m::Int, n::Int; kwargs...) = rationalcf(Fun(f, Chebyshev(Interval(dom...))), m, n; kwargs...)
@@ -94,6 +87,7 @@ function polynomialcf(c::AbstractVector{T}, m::Int, o::CFOptions) where {T <: Ab
     @assert !isempty(c) "Chebyshev coefficient vector must be non-empty"
     @assert 0 <= m "Requested polynomial degree m = $(m) must be non-negative"
 
+    c = @views c[1:min(end-1, o.maxdegree)+1] # truncate to maxdegree
     c = lazychopcoeffs(c; rtol = o.rtolchop, atol = o.atolchop) # view of non-negligible coefficients
     M = length(c) - 1
     m = min(m, M)
@@ -132,6 +126,7 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
     @assert 0 <= m "Requested numerator degree m = $(m) must be non-negative"
     @assert 0 <= n "Requested denominator degree n = $(n) must be non-negative"
 
+    c = @views c[1:min(end-1, o.maxdegree)+1] # view of coefficients truncated to `maxdegree`
     c = lazychopcoeffs(c; rtol = o.rtolchop, atol = o.atolchop) # view of non-negligible coefficients
     M = length(c) - 1
     m = min(m, M)
@@ -239,8 +234,9 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
     nq⁻¹ = ceil(Int, log(4 / eps(T) / (rho - 1)) / log(rho))
     qfun⁻¹ = Fun(x -> inv(qfun(x)), Interval(-one(T), one(T)), nq⁻¹)
     γ = coefficients(qfun⁻¹)
+    γ = cropto(zeropad(γ, 2m + 1), 2m + 1)
     γ₀ = γ[1] *= 2
-    Γ = toeplitz(cropto(zeropad(γ, 2m + 1), 2m + 1))
+    Γ = toeplitz(γ)
 
     if m == 0
         p = [ct[1] / γ₀]
@@ -326,7 +322,7 @@ function pade(c::AbstractVector{T}, m, n) where {T <: AbstractFloat}
 
     # Use convolution to compute numerator Laurent-Pade coefficients
     a[1] /= 2
-    α = @views conv(a[1:l+1], β)[1:l+1]
+    α = @views conv(a[1:l+1], β)[1:l+1] # Note: direct linear convolution is faster than FFT, since l = max(m, n) will never be very large in practice
 
     # Compute numerator Chebyshev-Pade coefficients
     p = zeros(T, m + 1)
@@ -354,13 +350,17 @@ end
 
 #### Minimax
 
-Base.@kwdef struct MinimaxOptions{T}
+Base.@kwdef struct MinimaxOptions{T <: AbstractFloat}
+    "Maximum Chebyshev series degree. Series is truncated to this degree if necessary"
+    maxdegree::Int = 2^10
     "Relative tolerance for detecting convergence"
     rtol::T = √eps(T)
     "Absolute tolerance for detecting convergence"
-    atol::T = 5*eps(T)
+    atol::T = 5 * eps(T)
     "Maximum number of iterations"
     maxiter::Int = 25
+    "Step size for Newton iteration"
+    stepsize::T = one(T)
 end
 
 function minimax(fun::Fun, m::Int, n::Int; kwargs...)
@@ -368,11 +368,36 @@ function minimax(fun::Fun, m::Int, n::Int; kwargs...)
     p, q, ε = minimax(fun, p₀, q₀; kwargs...)
     return p, q, ε
 end
-minimax(fun::Fun, pq::AbstractVector{T}...; kwargs...) where {T <: AbstractFloat} = minimax(coefficients(fun), pq...; kwargs...)
+minimax(fun::Fun, pq::AbstractVector...; kwargs...) = minimax(coefficients(fun), pq...; kwargs...)
 minimax(f::AbstractVector{T}, pq::AbstractVector{T}...; kwargs...) where {T <: AbstractFloat} = minimax(f, pq..., MinimaxOptions{T}(; kwargs...))
 
 minimax(f, dom::Tuple, m::Int, n::Int; kwargs...) = minimax(Fun(f, Chebyshev(Interval(dom...))), m, n; kwargs...)
 minimax(f, m::Int, n::Int; kwargs...) = minimax(Fun(f), m, n; kwargs...)
+
+struct PolynomialMinimaxWorkspace{T <: AbstractFloat}
+    f::Vector{T}
+    δf::Vector{T}
+    p::Vector{T}
+    x::Vector{T}
+    δFₓ::Vector{T}
+    Eₓ::Vector{T}
+    Sₓ::Vector{T}
+    δp_δε::Vector{T}
+    J::Matrix{T}
+    rhs::Vector{T}
+    γ::T
+end
+function PolynomialMinimaxWorkspace(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T}) where {T <: AbstractFloat}
+    m = length(p) - 1
+    nx = m + 2
+    f, p = collect(f), collect(p)
+    f = f[1:min(end-1, o.maxdegree)+1] # truncate to maxdegree
+    x, δFₓ, Eₓ, Sₓ, δp_δε = ntuple(_ -> zeros(T, nx), 5)
+    J, rhs = zeros(T, nx, nx), zeros(T, nx)
+    x[begin] = -one(T)
+    x[end] = one(T)
+    return PolynomialMinimaxWorkspace(f, copy(f), p, x, δFₓ, Eₓ, Sₓ, δp_δε, J, rhs, o.stepsize)
+end
 
 function minimax(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T}) where {T <: AbstractFloat}
     if length(p) <= 1
@@ -380,17 +405,17 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T
         return [(lo + hi) / 2], (hi - lo) / 2
     end
     m = length(p) - 1
-    p = copy(p)
-    δf = copy(f)
-    δF = Fun(Chebyshev(), δf)
-    x = zeros(T, m + 2)
-    x[begin] = -one(T)
-    x[end] = one(T)
-    δFₓ, Eₓ, Sₓ = (zero(x) for _ in 1:3)
-    J = zeros(T, m + 2, m + 2)
+    workspace = PolynomialMinimaxWorkspace(f, p, o)
+
+    check_signs(S) = if !all(S[i] == -S[i+1] for i in 1:length(S)-1)
+        @warn "Newton iterations converged, but error signs are not alternating"
+    end
 
     iter = 0
     @views while true
+        local (; f, δf, p, x, δFₓ, Eₓ, Sₓ, δp_δε, J, rhs, γ) = workspace
+        δF = Fun(Chebyshev(), δf)
+
         # Compute new local extrema
         @. δf[1:m+1] = f[1:m+1] - p
         x₀ = ApproxFun.roots(ApproxFun.differentiate(δF))
@@ -407,10 +432,15 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T
         @. Sₓ = sign(δFₓ) # sign of error at each root
 
         ε, σε = mean(Eₓ), std(Eₓ; corrected = false)
-        if iter >= o.maxiter || (σε <= max(o.rtol * ε, o.atol) && all(Sₓ[i] == -Sₓ[i+1] for i in 1:length(Sₓ)-1))
+        if σε <= max(o.rtol * ε, o.atol)
+            check_signs(Sₓ)
             return p, ε
         end
 
+        # Newton iteration on the (linear) residual equation
+        #   G(P, ε) = P(x) + ε * S(x) - F(x) = 0
+
+        # First m+1 columns: dG/dPⱼ = Tⱼ(x) / Q(x), j = 0, ..., m
         @. J[:, 1] = one(T)
         if m >= 1
             @. J[:, 2] = x
@@ -418,15 +448,62 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T
         for j in 3:m+1
             @. J[:, j] = 2x * J[:, j-1] - J[:, j-2]
         end
+
+        # Last column: dG/dε = S(x)
         @. J[:, m+2] = Sₓ
 
-        rhs = @. δFₓ - ε * Sₓ
-        δp_δε = J \ rhs
+        # Right-hand side: rhs = -G(P, ε)
+        @. rhs = δFₓ - ε * Sₓ
+
+        # Solve linear system: [δp; δε] = J \ rhs
+        ldiv!(δp_δε, qr!(J), rhs)
         δp = δp_δε[1:m+1]
         δε = δp_δε[m+2]
-        @. p += δp
-        iter += 1
+
+        # Damped Newton step
+        @. p += γ * δp
+
+        if abs(δε) <= max(o.rtol * ε, o.atol) || maximum(abs, δp) <= max(o.rtol * maximum(abs, p), o.atol)
+            # Newton step is small enough, so we're done
+            check_signs(Sₓ)
+            return p, ε
+        end
+
+        if (iter += 1) > o.maxiter
+            @warn "Maximum number of iterations reached"
+            check_signs(Sₓ)
+            return p, ε
+        end
     end
+end
+
+struct RationalMinimaxWorkspace{T <: AbstractFloat}
+    f::Vector{T}
+    p::Vector{T}
+    q::Vector{T}
+    x::Vector{T}
+    δFₓ::Vector{T}
+    Pₓ::Vector{T}
+    Qₓ::Vector{T}
+    Eₓ::Vector{T}
+    Sₓ::Vector{T}
+    δp_δq_δε::Vector{T}
+    J::Matrix{T}
+    rhs::Vector{T}
+    γ::T
+end
+function RationalMinimaxWorkspace(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T}, o::MinimaxOptions{T}) where {T <: AbstractFloat}
+    m, n = length(p) - 1, length(q) - 1
+    nx = m + n + 2
+    f, p, q = collect(f), collect(p), collect(q)
+    f = f[1:min(end-1, o.maxdegree)+1] # truncate to maxdegree
+    p ./= q[1]
+    q ./= q[1]
+    x, δFₓ, Pₓ, Qₓ, Eₓ, Sₓ, δp_δq_δε = ntuple(_ -> zeros(T, nx), 9)
+    J, rhs = zeros(T, nx, nx), zeros(T, nx)
+    x[begin] = -one(T)
+    x[end] = one(T)
+    return RationalMinimaxWorkspace(f, p, q, x, δFₓ, Pₓ, Qₓ, Eₓ, Sₓ, δp_δq_δε, J, rhs, o.stepsize)
 end
 
 function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T}, o::MinimaxOptions{T}) where {T <: AbstractFloat}
@@ -435,22 +512,21 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T
         return p, [one(T)], ε
     end
     m, n = length(p) - 1, length(q) - 1
-    p, q = copy(p), copy(q)
-    p ./= q[1]
-    q ./= q[1]
-    F = Fun(Chebyshev(), f)
-    P = Fun(Chebyshev(), p)
-    Q = Fun(Chebyshev(), q)
-    x = zeros(T, m + n + 2)
-    x[begin] = -one(T)
-    x[end] = one(T)
-    δFₓ, Fₓ, Qₓ, Eₓ, Sₓ = (zero(x) for _ in 1:5)
-    J = zeros(T, m + n + 2, m + n + 2)
+    workspace = RationalMinimaxWorkspace(f, p, q, o)
+
+    check_signs(S) = if !all(S[i] == -S[i+1] for i in 1:length(S)-1)
+        @warn "Newton iterations converged, but error signs are not alternating"
+    end
 
     iter = 0
     @views while true
+        local (; f, p, q, x, δFₓ, Pₓ, Qₓ, Eₓ, Sₓ, δp_δq_δε, J, rhs, γ) = workspace
+        F = Fun(Chebyshev(), f)
+        P = Fun(Chebyshev(), p)
+        Q = Fun(Chebyshev(), q)
+
         # Compute new local extrema
-        δF = F - P / Q
+        δF = (F - P / Q)::typeof(F)
         x₀ = ApproxFun.roots(ApproxFun.differentiate(δF))
         nx₀ = length(x₀)
         if nx₀ != m + n
@@ -461,16 +537,21 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T
 
         @. x[2:m+n+1] = x₀
         @. δFₓ = δF(x) # Note: (F - P)(x) is much more accurate than F(x) - P(x)
-        @. Fₓ = F(x)
         @. Qₓ = Q(x)
+        @. Pₓ = P(x)
         @. Eₓ = abs(δFₓ) # error at each root
         @. Sₓ = sign(δFₓ) # sign of error at each root
 
         ε, σε = mean(Eₓ), std(Eₓ; corrected = false)
-        if iter >= o.maxiter || (σε <= max(o.rtol * ε, o.atol) && all(Sₓ[i] == -Sₓ[i+1] for i in 1:length(Sₓ)-1))
+        if σε <= max(o.rtol * ε, o.atol)
+            check_signs(Sₓ)
             return p, q, ε
         end
 
+        # Newton iteration on the residual equation
+        #   G(P, Q, ε) = P(x) / Q(x) + ε * S(x) - F(x) = 0
+
+        # First m+1 columns: dG/dPⱼ = Tⱼ(x) / Q(x), j = 0, ..., m
         @. J[:, 1] = one(T)
         if m >= 1
             @. J[:, 2] = x
@@ -478,6 +559,9 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T
         for j in 3:m+1
             @. J[:, j] = 2x * J[:, j-1] - J[:, j-2]
         end
+        @. J[:, 1:m+1] /= Qₓ
+
+        # Next n columns: dG/dQⱼ = -P(x) * Tⱼ(x) / Q(x)², j = 1, ..., n
         @. J[:, m+2] = x
         if n >= 2
             @. J[:, m+3] = 2x^2 - 1
@@ -485,17 +569,35 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T
         for j in m+4:m+n+1
             @. J[:, j] = 2x * J[:, j-1] - J[:, j-2]
         end
-        @. J[:, m+2:m+n+1] *= (ε * Sₓ - Fₓ)
-        @. J[:, m+n+2] = Sₓ * Qₓ
+        @. J[:, m+2:m+n+1] *= -Pₓ / Qₓ^2
 
-        rhs = @. Qₓ * (δFₓ - ε * Sₓ)
-        δp_δq_δε = J \ rhs
+        # Last column: dG/dε = S(x)
+        @. J[:, m+n+2] = Sₓ
+
+        # Right hand side: -G(P, Q, ε)
+        @. rhs = δFₓ - ε * Sₓ
+
+        # Solve for Newton step: [δp; δq; δε] = J \ rhs
+        ldiv!(δp_δq_δε, qr!(J), rhs)
         δp = δp_δq_δε[1:m+1]
         δq = δp_δq_δε[m+2:m+n+1]
         δε = δp_δq_δε[m+n+2]
-        @. p += δp
-        @. q[2:n+1] += δq
-        iter += 1
+
+        # Damped Newton step
+        @. p += γ * δp
+        @. q[2:n+1] += γ * δq
+
+        if abs(δε) <= max(o.rtol * ε, o.atol) || maximum(abs, δp) <= max(o.rtol * maximum(abs, p), o.atol) || maximum(abs, δq) <= max(o.rtol * maximum(abs, q), o.atol)
+            # Newton step is small enough, so we're done
+            check_signs(Sₓ)
+            return p, q, ε
+        end
+
+        if (iter += 1) > o.maxiter
+            @warn "Maximum number of iterations reached"
+            check_signs(Sₓ)
+            return p, q, ε
+        end
     end
 end
 
@@ -538,53 +640,33 @@ function conv(a::AbstractVector, b::AbstractVector)
     return c
 end
 
-# Build a Hankel matrix from the given vector of coefficients
-function hankel(c::AbstractVector{T}) where {T}
-    n = length(c)
-    H = zeros(T, n, n)
-    for j in 1:n, i in 1:n-j+1
-        H[i, j] = c[i+j-1]
-    end
-    return Hermitian(H)
-end
+hankel(c::AbstractVector) = Hankel(zeropad(c, 2 * length(c) - 1))
+hankel(c::AbstractVector, r::AbstractVector) = Hankel(c, r)
+toeplitz(c::AbstractVector) = Toeplitz(c, c)
 
-function hankel(c::AbstractVector{T}, r::AbstractVector{T}) where {T}
-    @assert length(c) == length(r)
-    n = length(c)
-    H = zeros(T, n, n)
-    for j in 1:n
-        for i in 1:n-j+1
-            H[i, j] = c[i+j-1]
-        end
-        for i in n-j+2:n
-            H[i, j] = r[i+j-n]
-        end
-    end
-    return Hermitian(H)
+# Dummy wrapper to ensure we don't hit generic fallbacks
+struct HermitianWrapper{T <: AbstractFloat, A <: AbstractMatrix{T}} <: AbstractMatrix{T}
+    A::A
 end
-
-# Build a Toeplitz matrix from the given vector of coefficients
-function toeplitz(c::AbstractVector{T}) where {T}
-    n = length(c)
-    A = zeros(T, n, n)
-    for j in 1:n, i in 1:n
-        A[i, j] = c[abs(i - j)+1]
-    end
-    return Hermitian(A)
-end
+LinearAlgebra.size(H::HermitianWrapper) = size(H.A)
+LinearAlgebra.eltype(H::HermitianWrapper) = eltype(H.A)
+LinearAlgebra.parent(H::HermitianWrapper) = H.A
+LinearAlgebra.issymmetric(H::HermitianWrapper) = true
+LinearAlgebra.ishermitian(H::HermitianWrapper) = true
+LinearAlgebra.mul!(y::AbstractVector, H::HermitianWrapper, x::AbstractVector, α::Number, β::Number) = mul!(y, H.A, x, α, β)
 
 function eigs_hankel(c::AbstractVector{T}; nev = 1) where {T <: AbstractFloat}
     # Declaring variable types helps inference since `eigs` is not type-stable,
     # and `eigen` may not be type-stable for e.g. BigFloat
     local D::Vector{T}, V::Matrix{T}
     nc = length(c)
-    A = hankel(c)
+    H = hankel(c)
 
     if nc >= 32 && T <: Union{Float32, Float64}
-        D, V = eigs(A; nev, which = :LM, v0 = ones(T, nc) ./ nc)
+        D, V = eigs(HermitianWrapper(H); nev, which = :LM, v0 = ones(T, nc) ./ nc)
         D, V = convert(Vector{T}, D), convert(Matrix{T}, V)
     else
-        D, V = eigen(A)
+        D, V = eigen(Hermitian(Matrix(H))) # small problem; convert Hankel to dense Matrix
         I = partialsortperm(D, 1:nev; by = abs, rev = true)
         D, V = D[I], V[:, I]
     end

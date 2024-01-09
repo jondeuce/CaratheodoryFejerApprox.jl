@@ -13,6 +13,7 @@ LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 Polynomials = "f27b6e38-b328-58d1-80ce-0feddd5e7a45"
 Setfield = "efcf1570-3423-57d1-acb7-fd33fddbac46"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+ToeplitzMatrices = "c751599d-da0a-543b-9d20-d0a503d91d24"
 
 [compat]
 ApproxFun = "0.13"
@@ -27,6 +28,7 @@ Polynomials = "4"
 Setfield = "1"
 Statistics = "1"
 Test = "1"
+ToeplitzMatrices = "0.8"
 julia = "1.6"
 
 [extras]
