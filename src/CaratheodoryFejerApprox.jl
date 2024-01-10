@@ -441,29 +441,14 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T
         end
 
         # Newton iteration on the (linear) residual equation
-        #   G(P, ε) = P(x) + ε * S(x) - F(x) = 0
-
-        # First m+1 columns: dG/dPⱼ = Tⱼ(x) / Q(x), j = 0, ..., m
-        @. J[:, 1] = one(T)
-        if m >= 1
-            @. J[:, 2] = x
-        end
-        for j in 3:m+1
-            @. J[:, j] = 2x * J[:, j-1] - J[:, j-2]
-        end
-
-        # Last column: dG/dε = S(x)
-        @. J[:, m+2] = Sₓ
-
-        # Right-hand side: rhs = -G(P, ε)
-        @. rhs = δFₓ - ε * Sₓ
-
-        # Solve linear system: [δp; δε] = J \ rhs
-        ldiv!(δp_δε, qr!(J), rhs)
-        δp = δp_δε[1:m+1]
-        δε = δp_δε[m+2]
+        #   G(p, ε) = P(x) + ε * S(x) - F(x) = 0
+        residual_jacobian!(J, x, Sₓ) # Jacobian of residual equation: dG/d[p; ε]
+        @. rhs = δFₓ - ε * Sₓ # right hand side: -G(p, ε)
+        ldiv!(δp_δε, qr!(J), rhs) # solve for Newton step: [δp; δε] = J \ rhs
 
         # Damped Newton step
+        δp = δp_δε[1:m+1]
+        δε = δp_δε[m+2]
         @. p += γ * δp
 
         if abs(δε) <= max(o.rtol * ε, o.atol) || maximum(abs, δp) <= max(o.rtol * maximum(abs, p), o.atol)
@@ -548,41 +533,15 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T
         end
 
         # Newton iteration on the residual equation
-        #   G(P, Q, ε) = P(x) / Q(x) + ε * S(x) - F(x) = 0
+        #   G(p, q, ε) = P(x) / Q(x) + ε * S(x) - F(x) = 0
+        residual_jacobian!(J, x, Pₓ, Qₓ, Sₓ, m, n) # Jacobian of residual equation: dG/d[p; q; ε]
+        @. rhs = δFₓ - ε * Sₓ # right hand side: -G(p, q, ε)
+        ldiv!(δp_δq_δε, qr!(J), rhs) # solve for Newton step: [δp; δq; δε] = J \ rhs
 
-        # First m+1 columns: dG/dPⱼ = Tⱼ(x) / Q(x), j = 0, ..., m
-        @. J[:, 1] = one(T)
-        if m >= 1
-            @. J[:, 2] = x
-        end
-        for j in 3:m+1
-            @. J[:, j] = 2x * J[:, j-1] - J[:, j-2]
-        end
-        @. J[:, 1:m+1] /= Qₓ
-
-        # Next n columns: dG/dQⱼ = -P(x) * Tⱼ(x) / Q(x)², j = 1, ..., n
-        @. J[:, m+2] = x
-        if n >= 2
-            @. J[:, m+3] = 2x^2 - 1
-        end
-        for j in m+4:m+n+1
-            @. J[:, j] = 2x * J[:, j-1] - J[:, j-2]
-        end
-        @. J[:, m+2:m+n+1] *= -Pₓ / Qₓ^2
-
-        # Last column: dG/dε = S(x)
-        @. J[:, m+n+2] = Sₓ
-
-        # Right hand side: -G(P, Q, ε)
-        @. rhs = δFₓ - ε * Sₓ
-
-        # Solve for Newton step: [δp; δq; δε] = J \ rhs
-        ldiv!(δp_δq_δε, qr!(J), rhs)
+        # Damped Newton step
         δp = δp_δq_δε[1:m+1]
         δq = δp_δq_δε[m+2:m+n+1]
         δε = δp_δq_δε[m+n+2]
-
-        # Damped Newton step
         @. p += γ * δp
         @. q[2:n+1] += γ * δq
 
@@ -598,6 +557,62 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T
             return p, q, ε
         end
     end
+end
+
+@views function residual_jacobian!(J::AbstractMatrix{T}, x::AbstractVector{T}, Sₓ::AbstractVector{T}) where {T <: AbstractFloat}
+    # Compute Jacobian of residual equation:
+    #   G(p, ε) = P(x) + ε * S(x) - F(x) = 0
+    m = length(x) - 2
+    @assert size(J) == (m+2, m+2)
+    @assert length(Sₓ) == m+2
+
+    # First m+1 columns: dG/dPⱼ = Tⱼ(x), j = 0, ..., m
+    @. J[:, 1] = one(T) # T₀(x) = 1
+    if m >= 1
+        @. J[:, 2] = x # T₁(x) = x
+    end
+    for j in 3:m+1
+        @. J[:, j] = 2x * J[:, j-1] - J[:, j-2] # Tⱼ(x) = 2x * Tⱼ₋₁(x) - Tⱼ₋₂(x)
+    end
+
+    # Last column: dG/dε = S(x)
+    @. J[:, m+2] = Sₓ
+
+    return J
+end
+
+@views function residual_jacobian!(J::AbstractMatrix{T}, x::AbstractVector{T}, Pₓ::AbstractVector{T}, Qₓ::AbstractVector{T}, Sₓ::AbstractVector{T}, m::Int, n::Int) where {T <: AbstractFloat}
+    # Compute Jacobian of residual equation:
+    #   G(p, q, ε) = P(x) / Q(x) + ε * S(x) - F(x) = 0
+    nx = length(x)
+    @assert nx == m + n + 2
+    @assert size(J) == (nx, nx)
+    @assert length(Pₓ) == length(Qₓ) == length(Sₓ) == nx
+
+    # First m+1 columns: dG/dPⱼ = Tⱼ(x) / Q(x), j = 0, ..., m
+    @. J[:, 1] = one(T) # T₀(x) = 1
+    if m >= 1
+        @. J[:, 2] = x # T₁(x) = x
+    end
+    for j in 3:m+1
+        @. J[:, j] = 2x * J[:, j-1] - J[:, j-2] # Tⱼ(x) = 2x * Tⱼ₋₁(x) - Tⱼ₋₂(x)
+    end
+    @. J[:, 1:m+1] /= Qₓ
+
+    # Next n columns: dG/dQⱼ = -P(x) * Tⱼ(x) / Q(x)², j = 1, ..., n
+    @. J[:, m+2] = x # T₁(x) = x
+    if n >= 2
+        @. J[:, m+3] = 2x^2 - 1 # T₂(x) = 2x² - 1
+    end
+    for j in m+4:m+n+1
+        @. J[:, j] = 2x * J[:, j-1] - J[:, j-2] # Tⱼ(x) = 2x * Tⱼ₋₁(x) - Tⱼ₋₂(x)
+    end
+    @. J[:, m+2:m+n+1] *= -Pₓ / Qₓ^2
+
+    # Last column: dG/dε = S(x)
+    @. J[:, m+n+2] = Sₓ
+
+    return J
 end
 
 function check_signs(S; quiet = false)
