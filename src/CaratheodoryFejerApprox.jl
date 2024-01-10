@@ -33,11 +33,12 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 module CaratheodoryFejerApprox
 
 using ApproxFun: ApproxFun, Chebyshev, ChebyshevInterval, Fun, Interval, coefficients, domain, endpoints, ncoefficients, space
+using ArnoldiMethod: ArnoldiMethod, partialschur
 using Arpack: Arpack, eigs
 using FFTW: FFTW, irfft, rfft
 using GenericFFT: GenericFFT # defines generic methods for FFTs
 using GenericLinearAlgebra: GenericLinearAlgebra # defines generic method for `LinearAlgebra.eigen` and `Polynomials.roots`
-using LinearAlgebra: LinearAlgebra, Hermitian, cond, dot, eigen, ldiv!, mul!, qr!
+using LinearAlgebra: LinearAlgebra, Hermitian, cond, diag, dot, eigen, ldiv!, mul!, qr!
 using Polynomials: Polynomials, Polynomial
 using Setfield: Setfield, @set
 using Statistics: Statistics, mean, std
@@ -48,6 +49,8 @@ export polynomialcf, rationalcf
 Base.@kwdef struct CFOptions{T <: AbstractFloat}
     "Even/odd parity of f(x)"
     parity::Symbol = :generic
+    "Maximum Chebyshev series degree. Series is truncated to this degree if necessary"
+    maxdegree::Int = 2^10
     "Relative tolerance for chopping off small coefficients"
     rtolchop::T = eps(T)
     "Absolute tolerance for chopping off small coefficients"
@@ -55,7 +58,7 @@ Base.@kwdef struct CFOptions{T <: AbstractFloat}
     "Tolerance for detecting rationality"
     atolrat::T = 50 * eps(T)
     "Relative tolerance for FFT deconvolution"
-    rtolfft::T = eps(T)^(2 // 3)
+    rtolfft::T = 50 * eps(T)
     "Minimum FFT length"
     minnfft::Int = 2^8
     "Maximum FFT length"
@@ -87,7 +90,7 @@ function polynomialcf(c::AbstractVector{T}, m::Int, o::CFOptions) where {T <: Ab
     @assert !isempty(c) "Chebyshev coefficient vector must be non-empty"
     @assert 0 <= m "Requested polynomial degree m = $(m) must be non-negative"
 
-    c = @views c[1:min(end-1, o.maxdegree)+1] # truncate to maxdegree
+    c = @views c[1:min(end - 1, o.maxdegree)+1] # truncate to maxdegree
     c = lazychopcoeffs(c; rtol = o.rtolchop, atol = o.atolchop) # view of non-negligible coefficients
     M = length(c) - 1
     m = min(m, M)
@@ -126,7 +129,7 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
     @assert 0 <= m "Requested numerator degree m = $(m) must be non-negative"
     @assert 0 <= n "Requested denominator degree n = $(n) must be non-negative"
 
-    c = @views c[1:min(end-1, o.maxdegree)+1] # view of coefficients truncated to `maxdegree`
+    c = @views c[1:min(end - 1, o.maxdegree)+1] # view of coefficients truncated to `maxdegree`
     c = lazychopcoeffs(c; rtol = o.rtolchop, atol = o.atolchop) # view of non-negligible coefficients
     M = length(c) - 1
     m = min(m, M)
@@ -183,10 +186,12 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
     ud = polyder(u)
     bc = zeros(T, n)
     bc_prev = copy(bc)
+    Δbc = T(Inf)
     while true
         bc_prev, bc = bc, bc_prev
         @views bc .= incomplete_poly_fact_laurent_coeffs(u, ud, N)[end-n:end-1]
-        ((N *= 2) > o.maxnfft || isapprox(bc, bc_prev; rtol = o.rtolfft)) && break
+        Δbc_prev, Δbc = Δbc, maximum(abs, bc - bc_prev)
+        ((N *= 2) > o.maxnfft || (Δbc < √o.rtolfft * maximum(abs, bc) && Δbc > Δbc_prev / 2) || isapprox(bc, bc_prev; rtol = o.rtolfft)) && break
     end
 
     b = ones(T, n + 1)
@@ -216,13 +221,15 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
     N = max(nextpow(2, length(u)), o.minnfft)
     ac = zeros(T, m + 1) # symmetrized Laurent coefficients of Rt: [2*a₀, a₁ + a₋₁, ..., aₘ + a₋ₘ]
     ac_prev = copy(ac)
+    Δac = T(Inf)
     while true
         ac_prev, ac = ac, ac_prev
         ac_full = blaschke_laurent_coeffs(u, N, M) # Laurent coefficients of Rt: [a₀, a₁, ..., aₖ₋₁, a₋ₖ, ..., a₋₁] where k = N ÷ 2
         @views ac .= ac_full[1:m+1]
         @views ac[2:end] .+= ac_full[end:-1:end-m+1]
         ac[1] *= 2
-        ((N *= 2) > o.maxnfft || isapprox(ac, ac_prev; rtol = o.rtolfft)) && break
+        Δac_prev, Δac = Δac, maximum(abs, ac - ac_prev)
+        ((N *= 2) > o.maxnfft || (Δac < √o.rtolfft * maximum(abs, ac) && Δac > Δac_prev / 2) || isapprox(ac, ac_prev; rtol = o.rtolfft)) && break
     end
 
     ct = @views a[end:-1:end-m] .- s .* ac # (eqn. 1.7b)
@@ -391,7 +398,7 @@ function PolynomialMinimaxWorkspace(f::AbstractVector{T}, p::AbstractVector{T}, 
     m = length(p) - 1
     nx = m + 2
     f, p = collect(f), collect(p)
-    f = f[1:min(end-1, o.maxdegree)+1] # truncate to maxdegree
+    f = f[1:min(end - 1, o.maxdegree)+1] # truncate to maxdegree
     x, δFₓ, Eₓ, Sₓ, δp_δε = ntuple(_ -> zeros(T, nx), 5)
     J, rhs = zeros(T, nx, nx), zeros(T, nx)
     x[begin] = -one(T)
@@ -407,10 +414,6 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T
     m = length(p) - 1
     workspace = PolynomialMinimaxWorkspace(f, p, o)
 
-    check_signs(S) = if !all(S[i] == -S[i+1] for i in 1:length(S)-1)
-        @warn "Newton iterations converged, but error signs are not alternating"
-    end
-
     iter = 0
     @views while true
         local (; f, δf, p, x, δFₓ, Eₓ, Sₓ, δp_δε, J, rhs, γ) = workspace
@@ -422,7 +425,7 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T
         nx₀ = length(x₀)
         if nx₀ != m
             iter == 0 && @warn "Initial polynomial is not a good enough approximant for initializing minimax"
-            @warn "Found $nx₀ local extrema, but expected $m"
+            @warn "Found $(nx₀) local extrema, but expected $(m)"
             return p, T(NaN)
         end
 
@@ -496,7 +499,7 @@ function RationalMinimaxWorkspace(f::AbstractVector{T}, p::AbstractVector{T}, q:
     m, n = length(p) - 1, length(q) - 1
     nx = m + n + 2
     f, p, q = collect(f), collect(p), collect(q)
-    f = f[1:min(end-1, o.maxdegree)+1] # truncate to maxdegree
+    f = f[1:min(end - 1, o.maxdegree)+1] # truncate to maxdegree
     p ./= q[1]
     q ./= q[1]
     x, δFₓ, Pₓ, Qₓ, Eₓ, Sₓ, δp_δq_δε = ntuple(_ -> zeros(T, nx), 9)
@@ -514,10 +517,6 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T
     m, n = length(p) - 1, length(q) - 1
     workspace = RationalMinimaxWorkspace(f, p, q, o)
 
-    check_signs(S) = if !all(S[i] == -S[i+1] for i in 1:length(S)-1)
-        @warn "Newton iterations converged, but error signs are not alternating"
-    end
-
     iter = 0
     @views while true
         local (; f, p, q, x, δFₓ, Pₓ, Qₓ, Eₓ, Sₓ, δp_δq_δε, J, rhs, γ) = workspace
@@ -531,7 +530,7 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T
         nx₀ = length(x₀)
         if nx₀ != m + n
             iter == 0 && @warn "Initial polynomial is not a good enough approximant for initializing minimax"
-            @warn "Found $nx₀ local extrema, but expected $m"
+            @warn "Found $(nx₀) local extrema, but expected $(m+n)"
             return p, q, T(NaN)
         end
 
@@ -601,6 +600,12 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T
     end
 end
 
+function check_signs(S; quiet = false)
+    pass = all(S[i] == -S[i+1] for i in 1:length(S)-1)
+    !quiet && !pass && @warn "Newton iterations converged, but error signs are not alternating"
+    return pass
+end
+
 #### Linear algebra utilities
 
 function blaschke_laurent_coeffs(u::AbstractVector{T}, N::Int, M::Int) where {T <: AbstractFloat}
@@ -662,13 +667,16 @@ function eigs_hankel(c::AbstractVector{T}; nev = 1) where {T <: AbstractFloat}
     nc = length(c)
     H = hankel(c)
 
-    if nc >= 32 && T <: Union{Float32, Float64}
-        D, V = eigs(HermitianWrapper(H); nev, which = :LM, v0 = ones(T, nc) ./ nc)
-        D, V = convert(Vector{T}, D), convert(Matrix{T}, V)
-    else
-        D, V = eigen(Hermitian(Matrix(H))) # small problem; convert Hankel to dense Matrix
+    if nc <= 32 || nev >= nc ÷ 2
+        D, V = eigen(Hermitian(Matrix(H))) # small problem, or need large fraction of eigenspace; convert Hankel to dense Matrix
         I = partialsortperm(D, 1:nev; by = abs, rev = true)
         D, V = D[I], V[:, I]
+    elseif T <: Union{Float32, Float64}
+        D, V = eigs(HermitianWrapper(H); nev, which = :LM, v0 = ones(T, nc) ./ nc, tol = nc * eps(T))
+        D, V = convert(Vector{T}, D), convert(Matrix{T}, V)
+    else
+        F, _ = partialschur(HermitianWrapper(H); nev, which = ArnoldiMethod.LM(), tol = nc * eps(T))
+        D, V = real(diag(F.R)), real(F.Q)
     end
 
     return D, V
