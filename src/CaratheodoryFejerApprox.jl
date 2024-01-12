@@ -67,6 +67,8 @@ Base.@kwdef struct CFOptions{T <: AbstractFloat}
     rtolcond::T = 1e13
     "Absolute tolerance for detecting ill-conditioning"
     atolcond::T = 1e3
+    "Attempt to polish the approximant coefficients such that a true minimax approximation is obtained"
+    polish::Bool = false
     "Suppress warnings"
     quiet::Bool = false
 end
@@ -105,8 +107,8 @@ function polynomialcf(c::AbstractVector{T}, m::Int, o::CFOptions) where {T <: Ab
     end
 
     # Trivial cases
-    m == M && return cleanup_coeffs(c[1:M+1], o), zero(T)
-    m == M - 1 && return cleanup_coeffs(c[1:M], o), abs(c[M+1])
+    m == M && return postprocess(c, c[1:M+1], zero(T), o)
+    m == M - 1 && return postprocess(c, c[1:M], abs(c[M+1]), o)
 
     cm = @views c[m+2:M+1]
     D, V = eigs_hankel(cm; nev = 1)
@@ -121,7 +123,7 @@ function polynomialcf(c::AbstractVector{T}, m::Int, o::CFOptions) where {T <: Ab
     @views b[m+2:2m+1] .+= b[m:-1:1]
     p = @views c[1:m+1] - b[m+1:2m+1]
 
-    return cleanup_coeffs(p, o), abs(s)
+    return postprocess(c, p, abs(s), o)
 end
 
 function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where {T <: AbstractFloat}
@@ -168,7 +170,7 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
         if rflag
             # f is rational (at least up to machine precision)
             p, q = pade(c, m - k, n - k)
-            return cleanup_coeffs(p, q, o)..., eps(T)
+            return postprocess(c, p, q, eps(T), o)
         end
 
         n′ = n - k
@@ -213,7 +215,7 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
 
     # Compute q from the roots for stability reasons
     Π = prod(-, z)
-    qfun = Fun(x -> real(prod(zi -> x - zi, z) / Π), Interval(-one(T), one(T)))
+    qfun = Fun(x -> real(prod(zi -> x - zi, z) / Π), ChebyshevInterval{T}())
     q = coefficients(qfun)
 
     # Compute Chebyshev coefficients of approximation Rt from Laurent coefficients
@@ -239,7 +241,7 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
     # know the exact ellipse of analyticity for 1/q, so use this knowledge to
     # obtain its Chebyshev coefficients (see line below)
     nq⁻¹ = ceil(Int, log(4 / eps(T) / (rho - 1)) / log(rho))
-    qfun⁻¹ = Fun(x -> inv(qfun(x)), Interval(-one(T), one(T)), nq⁻¹)
+    qfun⁻¹ = Fun(x -> inv(qfun(x)), ChebyshevInterval{T}(), nq⁻¹)
     γ = coefficients(qfun⁻¹)
     γ = cropto(zeropad(γ, 2m + 1), 2m + 1)
     γ₀ = γ[1] *= 2
@@ -247,7 +249,7 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
 
     if m == 0
         p = [ct[1] / γ₀]
-        return cleanup_coeffs(p, q, o)..., s
+        return postprocess(c, p, q, s, o)
     end
 
     # The following steps reduce the Toeplitz system of size 2*m + 1 to a system of
@@ -266,7 +268,7 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
     bc₀ = (ct[1] - dot(B, bc)) / γ₀
     p = @views [bc₀; bc[end:-1:1]]
 
-    return cleanup_coeffs(p, q, o)..., s
+    return postprocess(c, p, q, s, o)
 end
 
 function rationalcf_reduced(c::AbstractVector, m::Int, o::CFOptions)
@@ -274,29 +276,53 @@ function rationalcf_reduced(c::AbstractVector, m::Int, o::CFOptions)
     return p, [one(eltype(c))], abs(s)
 end
 
-function cleanup_coeffs(p::AbstractVector{T}, o::CFOptions{T}) where {T <: AbstractFloat}
-    # Clean up even/odd symmetric coefficients
+function postprocess(c::AbstractVector{T}, p::AbstractVector{T}, s::T, o::CFOptions{T}) where {T <: AbstractFloat}
+    # Chop trailing zero coefficients to match parity
     p = paritychop(p, o.parity)
+
+    # Try to polish the coefficients to obtain true minimax approximation
+    if o.polish && s > 5 * eps(T)
+        p′, s′ = minimax(c, p, MinimaxOptions(o))
+        !isnan(s′) && ((p, s) = (p′, s′))
+    end
+
+    # Clean up even/odd symmetric coefficients
     if o.parity === :even
         @views p[2:2:end] .= zero(T)
     elseif o.parity === :odd
         @views p[1:2:end] .= zero(T)
     end
-    return p
+
+    return p, s
 end
 
-function cleanup_coeffs(p::AbstractVector{T}, q::AbstractVector{T}, o::CFOptions{T}) where {T <: AbstractFloat}
-    # Clean up even/odd symmetric coefficients
+function postprocess(c::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T}, s::T, o::CFOptions{T}) where {T <: AbstractFloat}
+    # Chop trailing zero coefficients to match parity
     if o.parity === :even
         p, q = paritychop(p, :even), paritychop(q, :even)
+    elseif o.parity === :odd
+        p, q = paritychop(p, :odd), paritychop(q, :even)
+    end
+
+    # Try to polish the coefficients to obtain true minimax approximation
+    if o.polish && s > 5 * eps(T)
+        p′, q′, s′ = minimax(c, p, q, MinimaxOptions(o))
+        !isnan(s′) && ((p, q, s) = (p′, q′, s′))
+    end
+
+    # Clean up even/odd symmetric coefficients
+    if o.parity === :even
         @views p[2:2:end] .= zero(T) # even
         @views q[2:2:end] .= zero(T) # even
     elseif o.parity === :odd
-        p, q = paritychop(p, :odd), paritychop(q, :even)
         @views p[1:2:end] .= zero(T) # odd
         @views q[2:2:end] .= zero(T) # even
     end
-    return p, q
+
+    # Normalize the coefficients
+    normalize_rational!(p, q)
+
+    return p, q, s
 end
 
 #### Pade
@@ -358,6 +384,8 @@ end
 #### Minimax
 
 Base.@kwdef struct MinimaxOptions{T <: AbstractFloat}
+    "Even/odd parity of f(x)"
+    parity::Symbol = :generic
     "Maximum Chebyshev series degree. Series is truncated to this degree if necessary"
     maxdegree::Int = 2^10
     "Relative tolerance for detecting convergence"
@@ -368,7 +396,13 @@ Base.@kwdef struct MinimaxOptions{T <: AbstractFloat}
     maxiter::Int = 25
     "Step size for Newton iteration"
     stepsize::T = one(T)
+    "Suppress warnings"
+    quiet::Bool = false
 end
+
+MinimaxOptions(o::MinimaxOptions{T}, c::AbstractVector{T}) where {T <: AbstractFloat} = @set o.parity = parity(c)
+MinimaxOptions(c::AbstractVector{T}; kwargs...) where {T <: AbstractFloat} = MinimaxOptions{T}(; parity = parity(c), kwargs...)
+MinimaxOptions(o::CFOptions{T}; kwargs...) where {T <: AbstractFloat} = MinimaxOptions{T}(; o.parity, o.maxdegree, o.quiet, kwargs...)
 
 function minimax(fun::Fun, m::Int, n::Int; kwargs...)
     p₀, q₀, _ = rationalcf(fun, m, n)
@@ -385,8 +419,6 @@ struct PolynomialMinimaxWorkspace{T <: AbstractFloat}
     f::Vector{T}
     δf::Vector{T}
     p::Vector{T}
-    x::Vector{T}
-    δFₓ::Vector{T}
     Eₓ::Vector{T}
     Sₓ::Vector{T}
     δp_δε::Vector{T}
@@ -397,52 +429,54 @@ end
 function PolynomialMinimaxWorkspace(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T}) where {T <: AbstractFloat}
     m = length(p) - 1
     nx = m + 2
+    (o.parity === :even || o.parity === :odd) && (nx += 1) # extra root expected for even/odd symmetry
     f, p = collect(f), collect(p)
     f = f[1:min(end - 1, o.maxdegree)+1] # truncate to maxdegree
-    x, δFₓ, Eₓ, Sₓ, δp_δε = ntuple(_ -> zeros(T, nx), 5)
-    J, rhs = zeros(T, nx, nx), zeros(T, nx)
-    x[begin] = -one(T)
-    x[end] = one(T)
-    return PolynomialMinimaxWorkspace(f, copy(f), p, x, δFₓ, Eₓ, Sₓ, δp_δε, J, rhs, o.stepsize)
+    Eₓ, Sₓ, δp_δε = ntuple(_ -> zeros(T, nx), 3)
+    J, rhs = zeros(T, nx, m + 2), zeros(T, nx)
+    return PolynomialMinimaxWorkspace(f, copy(f), p, Eₓ, Sₓ, δp_δε, J, rhs, o.stepsize)
 end
 
 function minimax(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T}) where {T <: AbstractFloat}
-    if length(p) <= 1
-        lo, hi = extrema(Fun(Chebyshev(), f))
-        return [(lo + hi) / 2], (hi - lo) / 2
-    end
+    length(p) <= 1 && return minimax_constant_polynomial(f)
     m = length(p) - 1
     workspace = PolynomialMinimaxWorkspace(f, p, o)
 
     iter = 0
     @views while true
-        local (; f, δf, p, x, δFₓ, Eₓ, Sₓ, δp_δε, J, rhs, γ) = workspace
+        local (; f, δf, p, Eₓ, Sₓ, δp_δε, J, rhs, γ) = workspace
         δF = Fun(Chebyshev(), δf)
+        nx = length(rhs)
+
+        # Update difference functional
+        @. δf[1:m+1] = f[1:m+1] - p
+        iszero(δF) && return p, eps(T)
 
         # Compute new local extrema
-        @. δf[1:m+1] = f[1:m+1] - p
-        x₀ = ApproxFun.roots(ApproxFun.differentiate(δF))
-        nx₀ = length(x₀)
-        if nx₀ != m
-            iter == 0 && @warn "Initial polynomial is not a good enough approximant for initializing minimax"
-            @warn "Found $(nx₀) local extrema, but expected $(m)"
+        x, δFₓ = extremal_nodes(δF)
+        nx₀ = length(x)
+        @. Eₓ = abs(δFₓ) # error at each root
+        @. Sₓ = sign(δFₓ) # sign of error at each root
+        εmin, εmax = extrema(Eₓ) # mean(Eₓ), std(Eₓ; corrected = false)
+        ε, σε = (εmax + εmin) / 2, (εmax - εmin) / 2
+
+        if nx₀ != nx
+            if iter == 0
+                εmax <= 50 * eps(T) * max(vscale(f), one(T)) && return p, q, εmax # initial approximant is sufficiently accurate
+                !o.quiet && @warn "Initial polynomial approximant is not good enough to initialize minimax fine-tuning"
+            end
+            !o.quiet && @warn "Found $(nx₀) local extrema for type ($m, $n) $(o.parity) polynomial approximant, but expected $(nx)"
             return p, T(NaN)
         end
 
-        @. x[2:m+1] = x₀
-        @. δFₓ = δF(x) # Note: (F - P)(x) is much more accurate than F(x) - P(x)
-        @. Eₓ = abs(δFₓ) # error at each root
-        @. Sₓ = sign(δFₓ) # sign of error at each root
-
-        ε, σε = mean(Eₓ), std(Eₓ; corrected = false)
         if σε <= max(o.rtol * ε, o.atol)
-            check_signs(Sₓ)
-            return p, ε
+            # Minimax variance sufficiently small
+            return check_signs(Sₓ; o.quiet) ? (p, ε) : (p, T(NaN))
         end
 
         # Newton iteration on the (linear) residual equation
         #   G(p, ε) = P(x) + ε * S(x) - F(x) = 0
-        residual_jacobian!(J, x, Sₓ) # Jacobian of residual equation: dG/d[p; ε]
+        residual_jacobian!(J, x, Sₓ, m) # Jacobian of residual equation: dG/d[p; ε]
         @. rhs = δFₓ - ε * Sₓ # right hand side: -G(p, ε)
         ldiv!(δp_δε, qr!(J), rhs) # solve for Newton step: [δp; δε] = J \ rhs
 
@@ -453,14 +487,12 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T
 
         if abs(δε) <= max(o.rtol * ε, o.atol) || maximum(abs, δp) <= max(o.rtol * maximum(abs, p), o.atol)
             # Newton step is small enough, so we're done
-            check_signs(Sₓ)
-            return p, ε
+            return check_signs(Sₓ; o.quiet) ? (p, ε) : (p, T(NaN))
         end
 
         if (iter += 1) > o.maxiter
-            @warn "Maximum number of iterations reached"
-            check_signs(Sₓ)
-            return p, ε
+            !o.quiet && @warn "Maximum number of iterations reached"
+            return check_signs(Sₓ; o.quiet) ? (p, ε) : (p, T(NaN))
         end
     end
 end
@@ -469,8 +501,6 @@ struct RationalMinimaxWorkspace{T <: AbstractFloat}
     f::Vector{T}
     p::Vector{T}
     q::Vector{T}
-    x::Vector{T}
-    δFₓ::Vector{T}
     Pₓ::Vector{T}
     Qₓ::Vector{T}
     Eₓ::Vector{T}
@@ -483,53 +513,55 @@ end
 function RationalMinimaxWorkspace(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T}, o::MinimaxOptions{T}) where {T <: AbstractFloat}
     m, n = length(p) - 1, length(q) - 1
     nx = m + n + 2
+    (o.parity === :even || o.parity === :odd) && (nx += 1) # extra root expected for even/odd symmetry
     f, p, q = collect(f), collect(p), collect(q)
     f = f[1:min(end - 1, o.maxdegree)+1] # truncate to maxdegree
-    p ./= q[1]
-    q ./= q[1]
-    x, δFₓ, Pₓ, Qₓ, Eₓ, Sₓ, δp_δq_δε = ntuple(_ -> zeros(T, nx), 9)
-    J, rhs = zeros(T, nx, nx), zeros(T, nx)
-    x[begin] = -one(T)
-    x[end] = one(T)
-    return RationalMinimaxWorkspace(f, p, q, x, δFₓ, Pₓ, Qₓ, Eₓ, Sₓ, δp_δq_δε, J, rhs, o.stepsize)
+    normalize_rational!(p, q)
+    Pₓ, Qₓ, Eₓ, Sₓ, δp_δq_δε = ntuple(_ -> zeros(T, nx), 5)
+    J, rhs = zeros(T, nx, m + n + 2), zeros(T, nx) # J may have more rows than columns for symmetric inputs
+    return RationalMinimaxWorkspace(f, p, q, Pₓ, Qₓ, Eₓ, Sₓ, δp_δq_δε, J, rhs, o.stepsize)
 end
 
 function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T}, o::MinimaxOptions{T}) where {T <: AbstractFloat}
-    if length(q) <= 1
-        p, ε = minimax(f, p, o)
-        return p, [one(T)], ε
-    end
+    length(q) <= 1 && return minimax_reduced(f, p, o)
+    length(p) <= 1 && o.parity === :odd && return minimax_constant_rational(f)
     m, n = length(p) - 1, length(q) - 1
     workspace = RationalMinimaxWorkspace(f, p, q, o)
 
     iter = 0
     @views while true
-        local (; f, p, q, x, δFₓ, Pₓ, Qₓ, Eₓ, Sₓ, δp_δq_δε, J, rhs, γ) = workspace
+        local (; f, p, q, Pₓ, Qₓ, Eₓ, Sₓ, δp_δq_δε, J, rhs, γ) = workspace
         F = Fun(Chebyshev(), f)
         P = Fun(Chebyshev(), p)
         Q = Fun(Chebyshev(), q)
+        nx = length(rhs)
+
+        # Update difference functional
+        δF = (F - P / Q)::typeof(F)
+        iszero(δF) && return p, q, eps(T)
 
         # Compute new local extrema
-        δF = (F - P / Q)::typeof(F)
-        x₀ = ApproxFun.roots(ApproxFun.differentiate(δF))
-        nx₀ = length(x₀)
-        if nx₀ != m + n
-            iter == 0 && @warn "Initial polynomial is not a good enough approximant for initializing minimax"
-            @warn "Found $(nx₀) local extrema, but expected $(m+n)"
-            return p, q, T(NaN)
-        end
-
-        @. x[2:m+n+1] = x₀
-        @. δFₓ = δF(x) # Note: (F - P)(x) is much more accurate than F(x) - P(x)
+        x, δFₓ = extremal_nodes(δF)
+        nx₀ = length(x)
         @. Qₓ = Q(x)
         @. Pₓ = P(x)
         @. Eₓ = abs(δFₓ) # error at each root
         @. Sₓ = sign(δFₓ) # sign of error at each root
+        εmin, εmax = extrema(Eₓ) # mean(Eₓ), std(Eₓ; corrected = false)
+        ε, σε = (εmax + εmin) / 2, (εmax - εmin) / 2
 
-        ε, σε = mean(Eₓ), std(Eₓ; corrected = false)
+        if nx₀ != nx
+            if iter == 0
+                εmax <= 50 * eps(T) * max(vscale(f), one(T)) && return p, q, εmax # approximant is sufficiently accurate
+                !o.quiet && @warn "Initial rational approximant is not good enough to initialize minimax fine-tuning"
+            end
+            !o.quiet && @warn "Found $(nx₀) local extrema for type ($m, $n) $(o.parity) rational approximant, but expected $(nx)"
+            return p, q, T(NaN)
+        end
+
         if σε <= max(o.rtol * ε, o.atol)
-            check_signs(Sₓ)
-            return p, q, ε
+            # Minimax variance sufficiently small
+            return check_signs(Sₓ; o.quiet) ? (p, q, ε) : (p, q, T(NaN))
         end
 
         # Newton iteration on the residual equation
@@ -547,24 +579,23 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T
 
         if abs(δε) <= max(o.rtol * ε, o.atol) || maximum(abs, δp) <= max(o.rtol * maximum(abs, p), o.atol) || maximum(abs, δq) <= max(o.rtol * maximum(abs, q), o.atol)
             # Newton step is small enough, so we're done
-            check_signs(Sₓ)
-            return p, q, ε
+            return check_signs(Sₓ; o.quiet) ? (p, q, ε) : (p, q, T(NaN))
         end
 
         if (iter += 1) > o.maxiter
-            @warn "Maximum number of iterations reached"
-            check_signs(Sₓ)
-            return p, q, ε
+            !o.quiet && @warn "Maximum number of iterations reached"
+            return check_signs(Sₓ; o.quiet) ? (p, q, ε) : (p, q, T(NaN))
         end
     end
 end
 
-@views function residual_jacobian!(J::AbstractMatrix{T}, x::AbstractVector{T}, Sₓ::AbstractVector{T}) where {T <: AbstractFloat}
+@views function residual_jacobian!(J::AbstractMatrix{T}, x::AbstractVector{T}, Sₓ::AbstractVector{T}, m::Int) where {T <: AbstractFloat}
     # Compute Jacobian of residual equation:
     #   G(p, ε) = P(x) + ε * S(x) - F(x) = 0
-    m = length(x) - 2
-    @assert size(J) == (m+2, m+2)
-    @assert length(Sₓ) == m+2
+    nx = length(x)
+    @assert nx >= m + 2
+    @assert size(J) == (nx, m + 2)
+    @assert length(Sₓ) == nx
 
     # First m+1 columns: dG/dPⱼ = Tⱼ(x), j = 0, ..., m
     @. J[:, 1] = one(T) # T₀(x) = 1
@@ -585,8 +616,8 @@ end
     # Compute Jacobian of residual equation:
     #   G(p, q, ε) = P(x) / Q(x) + ε * S(x) - F(x) = 0
     nx = length(x)
-    @assert nx == m + n + 2
-    @assert size(J) == (nx, nx)
+    @assert nx >= m + n + 2
+    @assert size(J) == (nx, m + n + 2)
     @assert length(Pₓ) == length(Qₓ) == length(Sₓ) == nx
 
     # First m+1 columns: dG/dPⱼ = Tⱼ(x) / Q(x), j = 0, ..., m
@@ -613,6 +644,44 @@ end
     @. J[:, m+n+2] = Sₓ
 
     return J
+end
+
+function extremal_nodes(δF::Fun)
+    x₀, x₁ = endpoints(domain(δF))
+    δF₀, δF₁ = δF(x₀), δF(x₁)
+
+    # Local extremal nodes
+    x = ApproxFun.roots(ApproxFun.differentiate(δF))
+    isempty(x) && return [x₀; x₁], [δF₀; δF₁]
+    sort!(x)
+
+    # An endpoint is an extremal node if it has a different sign than the nearest interior extremal node
+    δFₓ = δF.(x)
+    if sign(δF₀) != sign(δFₓ[1])
+        pushfirst!(x, x₀)
+        pushfirst!(δFₓ, δF₀)
+    end
+    if sign(δF₁) != sign(δFₓ[end])
+        push!(x, x₁)
+        push!(δFₓ, δF₁)
+    end
+
+    return x, δFₓ
+end
+
+function minimax_reduced(f::AbstractVector, p::AbstractVector, o::MinimaxOptions)
+    p, ε = minimax(f, p, o)
+    return p, [one(eltype(f))], ε
+end
+
+function minimax_constant_polynomial(f::AbstractVector{T}) where {T <: AbstractFloat}
+    lo, hi = extrema(Fun(Chebyshev(), f))
+    return [(lo + hi) / 2], (hi - lo) / 2
+end
+
+function minimax_constant_rational(f::AbstractVector{T}) where {T <: AbstractFloat}
+    p, ε = minimax_constant_polynomial(f)
+    return p, [one(T)], ε
 end
 
 function check_signs(S; quiet = false)
@@ -644,7 +713,7 @@ function incomplete_poly_fact_laurent_coeffs(u::AbstractVector{T}, du::AbstractV
 end
 
 @inline function z_div_conj_z(z::Complex)
-    # Efficiently and safely compute z / conj(z). Returns 1 if z == 0.
+    # Efficiently, safely, and accurately compute z / conj(z). Returns 1 if z == 0.
     a, b = reim(z)
     r² = a^2 + b^2
     return ifelse(r² == 0, one(z), Complex((a - b) * (a + b), 2 * a * b) / r²)
@@ -673,6 +742,8 @@ LinearAlgebra.eltype(H::HermitianWrapper) = eltype(H.A)
 LinearAlgebra.parent(H::HermitianWrapper) = H.A
 LinearAlgebra.issymmetric(H::HermitianWrapper) = true
 LinearAlgebra.ishermitian(H::HermitianWrapper) = true
+LinearAlgebra.transpose(H::HermitianWrapper) = H
+LinearAlgebra.adjoint(H::HermitianWrapper) = H
 LinearAlgebra.mul!(y::AbstractVector, H::HermitianWrapper, x::AbstractVector, α::Number, β::Number) = mul!(y, H.A, x, α, β)
 
 function eigs_hankel(c::AbstractVector{T}; nev = 1) where {T <: AbstractFloat}
@@ -787,6 +858,13 @@ polyder(p::Polynomial) = Polynomials.coeffs(Polynomials.derivative(p))
 
 polyroots(c::AbstractVector) = polyroots(Polynomial(c))
 polyroots(p::Polynomial) = complex(Polynomials.roots(p))
+
+function normalize_rational!(p::AbstractVector{T}, q::AbstractVector{T}) where {T <: AbstractFloat}
+    p ./= q[1]
+    q ./= q[1]
+    return p, q
+end
+normalize_rational(p::AbstractVector, q::AbstractVector) = normalize_rational!(copy(p), copy(q))
 
 function parity(c::AbstractVector{T}; rtol = eps(T)) where {T <: AbstractFloat}
     length(c) <= 1 && return :even # constant function

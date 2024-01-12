@@ -20,13 +20,7 @@ function [out] = benchmark(fun, dmax, parity)
     for d = dmax:-1:0
         for m = d:-1:0
             n = d - m;
-
-            % Note: there is a bug in the chebfun/cf.m for even/odd symmetric functions when n = 1
-            if n == 1 && (strcmpi(parity, 'even') || strcmpi(parity, 'odd'))
-                n = 0;
-            end
-
-            [p, q, r, s] = cf(fun, m, n);
+            [p, q, s] = chebfuncf(fun, m, n);
             out = out + abs(s); % ensure loop body not optimized away
         end
     end
