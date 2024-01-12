@@ -63,7 +63,8 @@ function [fun, m, n] = parse_inputs(f, varargin)
         fun = f;
         dom = domain(fun);
     else
-        fun = chebfun(f, dom(:)');
+        dom = dom(:)';
+        fun = chebfun(f, dom);
     end
 
     if isempty(parity)
@@ -81,6 +82,11 @@ function [fun, m, n] = parse_inputs(f, varargin)
     % Note: there is a bug in chebfun/cf.m for even/odd symmetric functions when n = 1,
     %       but in this case we know that the approximant is a polynomial.
     if n == 1 && (strcmpi(parity, 'even') || strcmpi(parity, 'odd'))
+        n = 0;
+    end
+
+    % Note: this is just to match behaviour with our implementation; we know the best approximant is constant.
+    if m == 0 && strcmpi(parity, 'odd')
         n = 0;
     end
 end

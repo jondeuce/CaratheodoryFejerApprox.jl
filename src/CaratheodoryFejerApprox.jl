@@ -40,7 +40,7 @@ using GenericFFT: GenericFFT # defines generic methods for FFTs
 using GenericLinearAlgebra: GenericLinearAlgebra # defines generic method for `LinearAlgebra.eigen` and `Polynomials.roots`
 using LinearAlgebra: LinearAlgebra, Hermitian, cond, diag, dot, eigen, ldiv!, mul!, qr!
 using Polynomials: Polynomials, Polynomial
-using Setfield: Setfield, @set
+using Setfield: Setfield, @set!
 using Statistics: Statistics, mean, std
 using ToeplitzMatrices: ToeplitzMatrices, Toeplitz, Hankel
 
@@ -49,6 +49,8 @@ export polynomialcf, rationalcf
 Base.@kwdef struct CFOptions{T <: AbstractFloat}
     "Even/odd parity of f(x)"
     parity::Symbol = :generic
+    "Upper bound on the maximum value of |f(x)|"
+    vscale::T = one(T)
     "Maximum Chebyshev series degree. Series is truncated to this degree if necessary"
     maxdegree::Int = 2^10
     "Relative tolerance for chopping off small coefficients"
@@ -73,8 +75,8 @@ Base.@kwdef struct CFOptions{T <: AbstractFloat}
     quiet::Bool = false
 end
 
-CFOptions(o::CFOptions{T}, c::AbstractVector{T}) where {T <: AbstractFloat} = @set o.parity = parity(c)
-CFOptions(c::AbstractVector{T}; kwargs...) where {T <: AbstractFloat} = CFOptions{T}(; parity = parity(c), kwargs...)
+CFOptions(o::CFOptions{T}, c::AbstractVector{T}) where {T <: AbstractFloat} = (@set! o.parity = parity(c); @set! o.vscale = vscale(c); return o)
+CFOptions(c::AbstractVector{T}; kwargs...) where {T <: AbstractFloat} = CFOptions{T}(; parity = parity(c), vscale = vscale(c), kwargs...)
 
 polynomialcf(fun::Fun, m::Int; kwargs...) = polynomialcf(coefficients(check_fun(fun)), m; kwargs...)
 polynomialcf(c::AbstractVector{<:AbstractFloat}, m::Int; kwargs...) = polynomialcf(c, m, CFOptions(c; kwargs...))
@@ -92,7 +94,8 @@ function polynomialcf(c::AbstractVector{T}, m::Int, o::CFOptions) where {T <: Ab
     @assert !isempty(c) "Chebyshev coefficient vector must be non-empty"
     @assert 0 <= m "Requested polynomial degree m = $(m) must be non-negative"
 
-    c = @views c[1:min(end - 1, o.maxdegree)+1] # truncate to maxdegree
+    iszero(o.vscale) && return zeros(T, 1), zero(T) # trivial function
+    c = @views c[1:min(end - 1, o.maxdegree)+1] ./ o.vscale # truncate to maxdegree and normalize scale
     c = lazychopcoeffs(c; rtol = o.rtolchop, atol = o.atolchop) # view of non-negligible coefficients
     M = length(c) - 1
     m = min(m, M)
@@ -107,8 +110,17 @@ function polynomialcf(c::AbstractVector{T}, m::Int, o::CFOptions) where {T <: Ab
     end
 
     # Trivial cases
-    m == M && return postprocess(c, c[1:M+1], zero(T), o)
-    m == M - 1 && return postprocess(c, c[1:M], abs(c[M+1]), o)
+    (m == M) && return postprocess(c, c[1:M+1], zero(T), o)
+    (m == M - 1) && return postprocess(c, c[1:M], abs(c[M+1]), o)
+    (m == 0) && return polynomialcf_constant(c, o)
+
+    if o.parity === :even
+        # If f(x) is even, we can reduce the problem to polynomial approximation of g(x) = f(T₂(x))
+        c′ = @views c[1:2:end]
+        p′, s = polynomialcf(c′, m ÷ 2, CFOptions(o, c′))
+        p = unzip(p′; even = true)
+        return postprocess(c, p, abs(s), o)
+    end
 
     cm = @views c[m+2:M+1]
     D, V = eigs_hankel(cm; nev = 1)
@@ -126,12 +138,21 @@ function polynomialcf(c::AbstractVector{T}, m::Int, o::CFOptions) where {T <: Ab
     return postprocess(c, p, abs(s), o)
 end
 
+function polynomialcf_constant(c::AbstractVector{T}, o::CFOptions{T}) where {T <: AbstractFloat}
+    M = length(c) - 1
+    D, V = @views eigs_hankel(c[2:M+1]; nev = 1)
+    s, u = only(D), vec(V)
+    p = @views c[1] + dot(c[2:M], u[2:M]) / u[1]
+    return postprocess(c, [p], abs(s), o)
+end
+
 function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where {T <: AbstractFloat}
     @assert !isempty(c) "Chebyshev coefficient vector must be non-empty"
     @assert 0 <= m "Requested numerator degree m = $(m) must be non-negative"
     @assert 0 <= n "Requested denominator degree n = $(n) must be non-negative"
 
-    c = @views c[1:min(end - 1, o.maxdegree)+1] # view of coefficients truncated to `maxdegree`
+    iszero(o.vscale) && return zeros(T, 1), zero(T) # trivial function
+    c = @views c[1:min(end - 1, o.maxdegree)+1] ./ o.vscale # truncate to maxdegree and normalize scale
     c = lazychopcoeffs(c; rtol = o.rtolchop, atol = o.atolchop) # view of non-negligible coefficients
     M = length(c) - 1
     m = min(m, M)
@@ -149,6 +170,17 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
 
     # Trivial cases
     (n == 0 || m == M) && return rationalcf_reduced(c, m, o)
+    (m == 0 && o.parity === :odd) && return rationalcf_reduced(c, 0, o) # best approximation is constant
+
+    # Check even/odd symmetries
+    if o.parity === :even
+        # If f(x) is even, we can reduce the problem to rational approximation of g(x) = f(T₂(x))
+        c′ = @views c[1:2:end]
+        p′, q′, s = rationalcf(c′, m ÷ 2, n ÷ 2, CFOptions(o, c′))
+        p = unzip(p′; even = true)
+        q = unzip(q′; even = true)
+        return postprocess(c, p, q, s, o)
+    end
 
     # Now, for even/odd symmetric functions, although we adjusted (m, n) above to respect the function symmetry,
     # the CF operator is continuous (and numerically stable) if and only if (m, n) lies in the lower-left or upper-right
@@ -272,8 +304,8 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
 end
 
 function rationalcf_reduced(c::AbstractVector, m::Int, o::CFOptions)
-    p, s = polynomialcf(c, m, o)
-    return p, [one(eltype(c))], abs(s)
+    p, s = polynomialcf(c, m, CFOptions(o, c))
+    return postprocess(c, p, [one(eltype(c))], abs(s), o)
 end
 
 function postprocess(c::AbstractVector{T}, p::AbstractVector{T}, s::T, o::CFOptions{T}) where {T <: AbstractFloat}
@@ -292,6 +324,10 @@ function postprocess(c::AbstractVector{T}, p::AbstractVector{T}, s::T, o::CFOpti
     elseif o.parity === :odd
         @views p[1:2:end] .= zero(T)
     end
+
+    # Rescale the outputs
+    p .*= o.vscale
+    s *= o.vscale
 
     return p, s
 end
@@ -321,6 +357,10 @@ function postprocess(c::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVect
 
     # Normalize the coefficients
     normalize_rational!(p, q)
+
+    # Rescale the outputs
+    p .*= o.vscale
+    s *= o.vscale
 
     return p, q, s
 end
@@ -386,6 +426,8 @@ end
 Base.@kwdef struct MinimaxOptions{T <: AbstractFloat}
     "Even/odd parity of f(x)"
     parity::Symbol = :generic
+    "Upper bound on the maximum value of |f(x)|"
+    vscale::T = one(T)
     "Maximum Chebyshev series degree. Series is truncated to this degree if necessary"
     maxdegree::Int = 2^10
     "Relative tolerance for detecting convergence"
@@ -400,8 +442,8 @@ Base.@kwdef struct MinimaxOptions{T <: AbstractFloat}
     quiet::Bool = false
 end
 
-MinimaxOptions(o::MinimaxOptions{T}, c::AbstractVector{T}) where {T <: AbstractFloat} = @set o.parity = parity(c)
-MinimaxOptions(c::AbstractVector{T}; kwargs...) where {T <: AbstractFloat} = MinimaxOptions{T}(; parity = parity(c), kwargs...)
+MinimaxOptions(o::MinimaxOptions{T}, c::AbstractVector{T}) where {T <: AbstractFloat} = (@set! o.parity = parity(c); @set! o.vscale = vscale(c); return o)
+MinimaxOptions(c::AbstractVector{T}; kwargs...) where {T <: AbstractFloat} = MinimaxOptions{T}(; parity = parity(c), vscale = vscale(c), kwargs...)
 MinimaxOptions(o::CFOptions{T}; kwargs...) where {T <: AbstractFloat} = MinimaxOptions{T}(; o.parity, o.maxdegree, o.quiet, kwargs...)
 
 function minimax(fun::Fun, m::Int, n::Int; kwargs...)
@@ -438,7 +480,7 @@ function PolynomialMinimaxWorkspace(f::AbstractVector{T}, p::AbstractVector{T}, 
 end
 
 function minimax(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T}) where {T <: AbstractFloat}
-    length(p) <= 1 && return minimax_constant_polynomial(f)
+    (length(p) <= 1) && return minimax_constant_polynomial(f)
     m = length(p) - 1
     workspace = PolynomialMinimaxWorkspace(f, p, o)
 
@@ -462,7 +504,7 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T
 
         if nx₀ != nx
             if iter == 0
-                εmax <= 50 * eps(T) * max(vscale(f), one(T)) && return p, q, εmax # initial approximant is sufficiently accurate
+                (εmax <= 50 * eps(T) * max(vscale(f), one(T))) && return p, q, εmax # initial approximant is sufficiently accurate
                 !o.quiet && @warn "Initial polynomial approximant is not good enough to initialize minimax fine-tuning"
             end
             !o.quiet && @warn "Found $(nx₀) local extrema for type ($m, $n) $(o.parity) polynomial approximant, but expected $(nx)"
@@ -523,8 +565,8 @@ function RationalMinimaxWorkspace(f::AbstractVector{T}, p::AbstractVector{T}, q:
 end
 
 function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T}, o::MinimaxOptions{T}) where {T <: AbstractFloat}
-    length(q) <= 1 && return minimax_reduced(f, p, o)
-    length(p) <= 1 && o.parity === :odd && return minimax_constant_rational(f)
+    (length(q) <= 1) && return minimax_reduced(f, p, o)
+    (length(p) <= 1 && o.parity === :odd) && return minimax_constant_rational(f)
     m, n = length(p) - 1, length(q) - 1
     workspace = RationalMinimaxWorkspace(f, p, q, o)
 
@@ -543,16 +585,17 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T
         # Compute new local extrema
         x, δFₓ = extremal_nodes(δF)
         nx₀ = length(x)
-        @. Qₓ = Q(x)
-        @. Pₓ = P(x)
-        @. Eₓ = abs(δFₓ) # error at each root
-        @. Sₓ = sign(δFₓ) # sign of error at each root
-        εmin, εmax = extrema(Eₓ) # mean(Eₓ), std(Eₓ; corrected = false)
+        nx′ = min(nx₀, nx)
+        @. Qₓ[1:nx′] = Q(x[1:nx′])
+        @. Pₓ[1:nx′] = P(x[1:nx′])
+        @. Eₓ[1:nx′] = abs(δFₓ[1:nx′]) # error at each root
+        @. Sₓ[1:nx′] = sign(δFₓ[1:nx′]) # sign of error at each root
+        εmin, εmax = extrema(Eₓ[1:nx′]) # mean(Eₓ), std(Eₓ; corrected = false)
         ε, σε = (εmax + εmin) / 2, (εmax - εmin) / 2
 
         if nx₀ != nx
             if iter == 0
-                εmax <= 50 * eps(T) * max(vscale(f), one(T)) && return p, q, εmax # approximant is sufficiently accurate
+                (εmax <= 50 * eps(T) * max(vscale(f), one(T))) && return p, q, εmax # approximant is sufficiently accurate
                 !o.quiet && @warn "Initial rational approximant is not good enough to initialize minimax fine-tuning"
             end
             !o.quiet && @warn "Found $(nx₀) local extrema for type ($m, $n) $(o.parity) rational approximant, but expected $(nx)"
@@ -716,7 +759,8 @@ end
     # Efficiently, safely, and accurately compute z / conj(z). Returns 1 if z == 0.
     a, b = reim(z)
     r² = a^2 + b^2
-    return ifelse(r² == 0, one(z), Complex((a - b) * (a + b), 2 * a * b) / r²)
+    w = Complex((a - b) * (a + b), 2 * a * b) / r²
+    return ifelse(r² == 0, one(w), w)
 end
 
 function conv(a::AbstractVector, b::AbstractVector)
@@ -828,6 +872,13 @@ function coefficients_and_endpoints(fun::Fun)
     return c, dom
 end
 
+function unzip(c::AbstractVector; even::Bool)
+    @assert length(c) >= 1
+    a = zeros(eltype(c), 2 * length(c) - even)
+    @views a[1+!even:2:end] .= c
+    return a
+end
+
 function zeropad(x::AbstractVector, n::Int)
     return n <= length(x) ? x : [x; zeros(eltype(x), n - length(x))]
 end
@@ -867,13 +918,13 @@ end
 normalize_rational(p::AbstractVector, q::AbstractVector) = normalize_rational!(copy(p), copy(q))
 
 function parity(c::AbstractVector{T}; rtol = eps(T)) where {T <: AbstractFloat}
-    length(c) <= 1 && return :even # constant function
+    (length(c) <= 1) && return :even # constant function
     scale = vscale(c)
-    scale == zero(T) && return :even
+    (scale == zero(T)) && return :even
     oddscale = @views vscale(c[1:2:end])
-    oddscale <= rtol * scale && return :odd
+    (oddscale <= rtol * scale) && return :odd
     evenscale = @views vscale(c[2:2:end])
-    evenscale <= rtol * scale && return :even
+    (evenscale <= rtol * scale) && return :even
     return :generic
 end
 parity(fun::Fun; kwargs...) = parity(coefficients(fun); kwargs...)

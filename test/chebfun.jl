@@ -39,7 +39,7 @@ runge(x) = 1 / (1 + 25x^2)
     @testset "m=$m, dom=$dom" for m in 0:8, dom in [(-1.0, 1.0), (-0.97, 1.32)]
         parity = dom[1] == -dom[2] ? fparity : :generic
         p, _, s = chebfuncf(fstr, dom, m, 0; parity)
-        p̂, ŝ = polynomialcf(f, dom, m; parity)
+        p̂, ŝ = polynomialcf(f, dom, m; parity, vscale = 1.0)
 
         # Polynomial CF is stable; coefficients should match to high precision
         @test compare_chebcoeffs(p, p̂; atol = 1e-14, rtol = 1e-14, parity)
@@ -63,7 +63,7 @@ end
         p_parity = parity === :even ? :even : parity === :odd ? :odd : :generic
         q_parity = (parity === :even || parity === :odd) ? :even : :generic
         p, q, s = chebfuncf(fstr, dom, m, n; parity)
-        p̂, q̂, ŝ = rationalcf(f, dom, m, n; parity)
+        p̂, q̂, ŝ = rationalcf(f, dom, m, n; parity, vscale = 1.0)
 
         p, q = normalize_rat(p, q)
         p̂, q̂ = normalize_rat(p̂, q̂)
