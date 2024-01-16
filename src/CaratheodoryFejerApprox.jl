@@ -1,7 +1,15 @@
 #=
-CaratheodoryFejerApprox.jl is based largely on the following files from Chebfun v5:
+CaratheodoryFejerApprox.jl is based largely on the following papers:
+
+    [1] Gutknecht MH, Trefethen LN. Real Polynomial Chebyshev Approximation by the Carathéodory–Fejér method. SIAM J Numer Anal 1982; 19: 358–371.
+    [2] Trefethen LN, Gutknecht MH. The Carathéodory–Fejér Method for Real Rational Approximation. SIAM J Numer Anal 1983; 20: 420–436.
+    [3] Henrici P. Fast Fourier Methods in Computational Complex Analysis. SIAM Rev 1979; 21: 481–527.
+
+As well as the following files from Chebfun v5:
+
     chebfun/@chebfun/cf.m
     chebfun/@chebfun/chebpade.m
+
 Chebfun v5 is distributed under the following license:
 
 Copyright (c) 2017, The Chancellor, Masters and Scholars of the University
@@ -39,7 +47,7 @@ using FFTW: FFTW, irfft, rfft
 using GenericFFT: GenericFFT # defines generic methods for FFTs
 using GenericLinearAlgebra: GenericLinearAlgebra # defines generic method for `LinearAlgebra.eigen` and `Polynomials.roots`
 using LinearAlgebra: LinearAlgebra, Hermitian, cond, diag, dot, eigen, ldiv!, mul!, qr!
-using Polynomials: Polynomials, Polynomial
+using Polynomials: Polynomials, ChebyshevT, Polynomial
 using Setfield: Setfield, @set!
 using Statistics: Statistics, mean, std
 using ToeplitzMatrices: ToeplitzMatrices, Toeplitz, Hankel
@@ -59,7 +67,7 @@ Base.@kwdef struct CFOptions{T <: AbstractFloat}
     atolchop::T = zero(T)
     "Tolerance for detecting rationality"
     atolrat::T = 50 * eps(T)
-    "Relative tolerance for FFT deconvolution"
+    "Relative tolerance for Fourier integrals"
     rtolfft::T = 50 * eps(T)
     "Minimum FFT length"
     minnfft::Int = 2^8
@@ -151,7 +159,7 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
     @assert 0 <= m "Requested numerator degree m = $(m) must be non-negative"
     @assert 0 <= n "Requested denominator degree n = $(n) must be non-negative"
 
-    iszero(o.vscale) && return zeros(T, 1), zero(T) # trivial function
+    iszero(o.vscale) && return zeros(T, 1), ones(T, 1), zero(T) # trivial function
     c = @views c[1:min(end - 1, o.maxdegree)+1] ./ o.vscale # truncate to maxdegree and normalize scale
     c = lazychopcoeffs(c; rtol = o.rtolchop, atol = o.atolchop) # view of non-negligible coefficients
     M = length(c) - 1
@@ -215,72 +223,69 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
         end
     end
 
-    # Obtain polynomial q from Laurent coefficients using FFT
+    # Compute Chebyshev coefficients of approximation R̃(x) (eqn. 1.7b[2]) from the Laurent coefficients
+    # of the Blaschke product b(z) (eqn. 1.6b[2]) via FFT
     N = max(nextpow(2, length(u)), o.minnfft)
-    ud = polyder(u)
-    bc = zeros(T, n)
-    bc_prev = copy(bc)
-    Δbc = T(Inf)
+    c̃ = zeros(T, m + 1) # Chebyshev coefficients of R̃(x): [c̃₀, c̃₁, ..., c̃ₘ] = [2*a₀, a₁ + a₋₁, ..., aₘ + a₋ₘ]
+    c̃_prev = copy(c̃)
+    Δc̃ = T(Inf)
     while true
-        bc_prev, bc = bc, bc_prev
-        @views bc .= incomplete_poly_fact_laurent_coeffs(u, ud, N)[end-n:end-1]
-        Δbc_prev, Δbc = Δbc, maximum(abs, bc - bc_prev)
-        ((N *= 2) > o.maxnfft || (Δbc < √o.rtolfft * maximum(abs, bc) && Δbc > Δbc_prev / 2) || isapprox(bc, bc_prev; rtol = o.rtolfft)) && break
+        c̃_prev, c̃ = c̃, c̃_prev
+        c̃_full = blaschke_laurent_coeffs(u, N, M) # Laurent coefficients of R̃(x): [a₀, a₁, ..., aₖ₋₁, a₋ₖ, ..., a₋₁] where k = N ÷ 2
+        @views c̃ .= c̃_full[1:m+1]
+        @views c̃[2:end] .+= c̃_full[end:-1:end-m+1]
+        c̃[1] *= 2
+        Δc̃_prev, Δc̃ = Δc̃, maximum(abs, c̃ - c̃_prev)
+        ((N *= 2) > o.maxnfft || (Δc̃ < √o.rtolfft * maximum(abs, c̃) && Δc̃ > Δc̃_prev / 2) || isapprox(c̃, c̃_prev; rtol = o.rtolfft)) && break
     end
 
+    @views c̃ .= a[end:-1:end-m] .- s .* c̃ # (eqn. 1.7b[2])
+    s = abs(s)
+
+    # Compute the polynomial q(z) via incomplete factorization (sec. 3.2[3]) of the denominator of the Blaschke product b(z) (eqn. 1.6b[2]).
+    # This is done by computing the Laurent coefficients of p'(z) / p(z) via FFT, where p(z) is the numerator of b(z),
+    # noting that the numerator of b(z) is the reciprocal polynomial zⁿ⋅b(z⁻¹) of the denominator.
+    N = max(nextpow(2, length(u)), o.minnfft)
+    ud = polyder(u)
+    s̃ = zeros(T, n)
+    s̃_prev = copy(s̃)
+    Δs̃ = T(Inf)
+    while true
+        s̃_prev, s̃ = s̃, s̃_prev
+        @views s̃ .= incomplete_poly_fact_laurent_coeffs(u, ud, N)[end-n:end-1]
+        Δs̃_prev, Δs̃ = Δs̃, maximum(abs, s̃ - s̃_prev)
+        ((N *= 2) > o.maxnfft || (Δs̃ < √o.rtolfft * maximum(abs, s̃) && Δs̃ > Δs̃_prev / 2) || isapprox(s̃, s̃_prev; rtol = o.rtolfft)) && break
+    end
+
+    # Compute coefficients bᵢ of the incomplete factorization q(z) = ∑ᵢ₌₀ⁿ bᵢzⁱ (eqn. 3.11[3])
     b = ones(T, n + 1)
     for j in 1:n
-        b[j+1] = @views -dot(b[1:j], bc[end-j+1:end]) / j
+        b[j+1] = @views -dot(b[1:j], s̃[end-j+1:end]) / j
     end
     reverse!(b)
 
-    z = polyroots(b)
-    zmax = maximum(abs, z)
-    if zmax > 1
-        !o.quiet && @warn "Ill-conditioning detected. Results may be inaccurate"
-        filter!(zi -> abs(zi) < 1, z)
-        zmax = maximum(abs, z)
+    # Compute the Chebyshev coefficients of the polynomial Q(x) = q(z)q(z⁻¹)/τ = |q(z)|²/τ (eqn. 1.10[2]) where z ∈ ∂D⁺ and τ = q(i)q(-i).
+    q, ρ = rationalcf_normalized_denominator(b; o.quiet)
+    n = length(q) - 1 # denominator degree may change in degenerate cases
+    Q = Fun(ChebyshevInterval{T}(), q)
+
+    # Compute numerator polynomial from Chebyshev expansion of 1/Q(x) and R̃(x)
+    if n > 0
+        # We know the exact ellipse of analyticity for 1/Q(x), so use this knowledge to
+        # obtain its Chebyshev coefficients:
+        ρ⁻¹ = inv(clamp(ρ, eps(T), 1 - eps(T)))
+        nq⁻¹ = ceil(Int, log(4 / eps(T) / (ρ⁻¹ - 1)) / log(ρ⁻¹))
+        Q⁻¹ = Fun(x -> inv(Q(x)), ChebyshevInterval{T}(), min(nq⁻¹, o.maxdegree))
+        γ = zeropadresize!(coefficients(Q⁻¹), 2m + 1)
+    else
+        γ = zeros(T, 2m + 1)
+        γ[1] = inv(q[1])
     end
-
-    rho = inv(zmax)
-    z = @. (z + inv(z)) / 2
-
-    # Compute q from the roots for stability reasons
-    Π = prod(-, z)
-    qfun = Fun(x -> real(prod(zi -> x - zi, z) / Π), ChebyshevInterval{T}())
-    q = coefficients(qfun)
-
-    # Compute Chebyshev coefficients of approximation Rt from Laurent coefficients
-    # of Blaschke product using FFT
-    N = max(nextpow(2, length(u)), o.minnfft)
-    ac = zeros(T, m + 1) # symmetrized Laurent coefficients of Rt: [2*a₀, a₁ + a₋₁, ..., aₘ + a₋ₘ]
-    ac_prev = copy(ac)
-    Δac = T(Inf)
-    while true
-        ac_prev, ac = ac, ac_prev
-        ac_full = blaschke_laurent_coeffs(u, N, M) # Laurent coefficients of Rt: [a₀, a₁, ..., aₖ₋₁, a₋ₖ, ..., a₋₁] where k = N ÷ 2
-        @views ac .= ac_full[1:m+1]
-        @views ac[2:end] .+= ac_full[end:-1:end-m+1]
-        ac[1] *= 2
-        Δac_prev, Δac = Δac, maximum(abs, ac - ac_prev)
-        ((N *= 2) > o.maxnfft || (Δac < √o.rtolfft * maximum(abs, ac) && Δac > Δac_prev / 2) || isapprox(ac, ac_prev; rtol = o.rtolfft)) && break
-    end
-
-    ct = @views a[end:-1:end-m] .- s .* ac # (eqn. 1.7b)
-    s = abs(s)
-
-    # Compute numerator polynomial from Chebyshev expansion of 1/q and Rt. We
-    # know the exact ellipse of analyticity for 1/q, so use this knowledge to
-    # obtain its Chebyshev coefficients (see line below)
-    nq⁻¹ = ceil(Int, log(4 / eps(T) / (rho - 1)) / log(rho))
-    qfun⁻¹ = Fun(x -> inv(qfun(x)), ChebyshevInterval{T}(), nq⁻¹)
-    γ = coefficients(qfun⁻¹)
-    γ = cropto(zeropad(γ, 2m + 1), 2m + 1)
     γ₀ = γ[1] *= 2
     Γ = toeplitz(γ)
 
     if m == 0
-        p = [ct[1] / γ₀]
+        p = [c̃[1] / γ₀]
         return postprocess(c, p, q, s, o)
     end
 
@@ -296,11 +301,53 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
         !o.quiet && @warn "Ill-conditioning detected. Results may be inaccurate"
     end
 
-    bc = @views G \ (-2 * ((ct[1] / γ₀) * B - ct[m+1:-1:2]))
-    bc₀ = (ct[1] - dot(B, bc)) / γ₀
+    bc = @views G \ (-2 * ((c̃[1] / γ₀) * B - c̃[m+1:-1:2]))
+    bc₀ = (c̃[1] - dot(B, bc)) / γ₀
     p = @views [bc₀; bc[end:-1:1]]
 
     return postprocess(c, p, q, s, o)
+end
+
+function rationalcf_normalized_denominator(b::AbstractVector{T}; quiet::Bool = false) where {T <: AbstractFloat}
+    # Compute the Chebyshev coefficients of the polynomial Q(x) = q(z)q(z⁻¹)/τ = |q(z)|²/τ (eqn. 1.10[2]),
+    # where z ∈ ∂D⁺, τ = q(i)q(-i), and q(z) = ∑ᵢ₌₀ⁿ bᵢzⁱ is "the normalized denominator of r̃∗(z) (eqn. 1.6a[2]) -
+    # the polynomial of degree <= n with constant term b₀ = 1 whose zeros are the finite poles of r̃∗(z) lying outside ∂D"[2].
+    # Returns the Chebyshev coefficients of Q(x) and the radius of the annulus ρ < |z| < ρ⁻¹ which contains no zeros.
+    z = polyroots(b)
+    ρ = maximum(abs, z)
+
+    if ρ < 1
+        # Normal case; roots are all within the unit disk. Compute Chebyshev coefficients of Q(x) by expanding the product directly:
+        #   Q̃(x) = q(z)q(z⁻¹) = (∑ᵢ₌₀ⁿ bᵢ zⁱ) (∑ⱼ₌₀ⁿ bⱼ z⁻ʲ)
+        #        = ∑ᵢ,ⱼ₌₀ⁿ bᵢ bⱼ zⁱ⁻ʲ
+        #        = ∑′ₖ₌₀ⁿ ∑ₗ₌ₖⁿ bₖ bₗ (zᵏ + z⁻ᵏ)    where ∑′ means k=0 term is halved
+        #        = ∑′ₖ₌₀ⁿ (2 bₖ ∑ₗ₌ₖⁿ bₗ) Tₖ(x)     where Tₖ(x) = (zᵏ + z⁻ᵏ) / 2 for z ∈ ∂D⁺
+        n = length(b) - 1
+        q = zeros(T, n + 1)
+        for k in 1:n+1
+            q[1] += b[k]^2
+            for l in k+1:n+1
+                q[l-k+1] += 2 * b[k] * b[l]
+            end
+        end
+        normalize_chebpoly!(q) # normalize by τ = q(i)q(-i) = Q̃(0)
+    else
+        # Degenerate case; roots are not all within the unit disk. As in chebfun, we filter out roots with |z| > 1
+        # and then compute Q(x) using the renormalized q(z).
+        !quiet && @warn "Ill-conditioning detected. Results may be inaccurate"
+        filter!(zi -> abs(zi) < 1, z)
+        isempty(z) && return ones(T, 1), zero(T)
+        ρ = maximum(abs, z)
+        n = length(z)
+
+        # Form Q(x) using Chebyshev interpolation of q(z)q(z⁻¹)/τ; this is more numerically stable than expanding ∏ᵢ₌₁ⁿ (z - zᵢ)(z⁻¹ - zᵢ)
+        @. z = (z + inv(z)) / 2
+        Π = prod(-, z)
+        Q = Fun(x -> real(prod(zi -> x - zi, z) / Π), ChebyshevInterval{T}(), n + 1)
+        q = coefficients(Q)
+    end
+
+    return q, ρ
 end
 
 function rationalcf_reduced(c::AbstractVector, m::Int, o::CFOptions)
@@ -356,7 +403,7 @@ function postprocess(c::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVect
     end
 
     # Normalize the coefficients
-    normalize_rational!(p, q)
+    normalize_chebrational!(p, q)
 
     # Rescale the outputs
     p .*= o.vscale
@@ -399,24 +446,19 @@ function pade(c::AbstractVector{T}, m, n) where {T <: AbstractFloat}
 
     # Compute numerator Chebyshev-Pade coefficients
     p = zeros(T, m + 1)
-    D = zeros(T, l + 1, l + 1)
-    @views D[1:l+1, 1:n+1] .= α .* β'
-    for j in 1:l+1, i in max(1, j - m):min(l + 1, j + m)
-        p[abs(i - j)+1] += D[i, j] # p[1] = sum(diag(D)) and p[k+1] = sum(diag(D, k)) + sum(diag(D, -k)) for 1 <= k <= m
+    for j in 1:n+1, i in max(1, j - m):min(l + 1, j + m)
+        p[abs(i - j)+1] += α[i] * β[j] # p[k] is the sum of the k'th and -k'th diagonals of D = α⋅βᵀ
     end
 
     # Compute denominator Chebyshev-Pade coefficients
     q = zeros(T, n + 1)
-    for k in 1:n+1
-        u = @views β[1:n+2-k]
-        v = @views β[k:end]
-        q[k] = dot(u, v)
+    q[1] = sum(abs2, β)
+    @views for k in 2:n+1
+        q[k] = 2 * dot(β[1:n+2-k], β[k:n+1])
     end
 
     # Normalize the coefficients
-    p ./= q[1]
-    q ./= q[1] / 2
-    q[1] = one(T)
+    normalize_chebrational!(p, q)
 
     return p, q
 end
@@ -497,14 +539,15 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T
         # Compute new local extrema
         x, δFₓ = extremal_nodes(δF)
         nx₀ = length(x)
-        @. Eₓ = abs(δFₓ) # error at each root
-        @. Sₓ = sign(δFₓ) # sign of error at each root
-        εmin, εmax = extrema(Eₓ) # mean(Eₓ), std(Eₓ; corrected = false)
+        nx′ = min(nx₀, nx)
+        @. Eₓ[1:nx′] = abs(δFₓ[1:nx′]) # error at each root
+        @. Sₓ[1:nx′] = sign(δFₓ[1:nx′]) # sign of error at each root
+        εmin, εmax = extrema(Eₓ[1:nx′])
         ε, σε = (εmax + εmin) / 2, (εmax - εmin) / 2
 
         if nx₀ != nx
             if iter == 0
-                (εmax <= 50 * eps(T) * max(vscale(f), one(T))) && return p, q, εmax # initial approximant is sufficiently accurate
+                (εmax <= 50 * eps(T) * max(vscale(f), one(T))) && return p, εmax # initial approximant is sufficiently accurate
                 !o.quiet && @warn "Initial polynomial approximant is not good enough to initialize minimax fine-tuning"
             end
             !o.quiet && @warn "Found $(nx₀) local extrema for type ($m, $n) $(o.parity) polynomial approximant, but expected $(nx)"
@@ -590,7 +633,7 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T
         @. Pₓ[1:nx′] = P(x[1:nx′])
         @. Eₓ[1:nx′] = abs(δFₓ[1:nx′]) # error at each root
         @. Sₓ[1:nx′] = sign(δFₓ[1:nx′]) # sign of error at each root
-        εmin, εmax = extrema(Eₓ[1:nx′]) # mean(Eₓ), std(Eₓ; corrected = false)
+        εmin, εmax = extrema(Eₓ[1:nx′])
         ε, σε = (εmax + εmin) / 2, (εmax - εmin) / 2
 
         if nx₀ != nx
@@ -712,19 +755,19 @@ function extremal_nodes(δF::Fun)
     return x, δFₓ
 end
 
-function minimax_reduced(f::AbstractVector, p::AbstractVector, o::MinimaxOptions)
+function minimax_reduced(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T}) where {T <: AbstractFloat}
     p, ε = minimax(f, p, o)
-    return p, [one(eltype(f))], ε
+    return p, [one(T)], T(ε)
 end
 
 function minimax_constant_polynomial(f::AbstractVector{T}) where {T <: AbstractFloat}
     lo, hi = extrema(Fun(Chebyshev(), f))
-    return [(lo + hi) / 2], (hi - lo) / 2
+    return [T(lo + hi) / 2], T(hi - lo) / 2
 end
 
 function minimax_constant_rational(f::AbstractVector{T}) where {T <: AbstractFloat}
     p, ε = minimax_constant_polynomial(f)
-    return p, [one(T)], ε
+    return p, [one(T)], T(ε)
 end
 
 function check_signs(S; quiet = false)
@@ -879,13 +922,17 @@ function unzip(c::AbstractVector; even::Bool)
     return a
 end
 
-function zeropad(x::AbstractVector, n::Int)
-    return n <= length(x) ? x : [x; zeros(eltype(x), n - length(x))]
+function zeropad!(x::AbstractVector, n::Int)
+    (nx = length(x)) >= n && return x
+    resize!(x, n)[nx+1:end] .= zero(eltype(x))
+    return x
 end
+zeropad(x::AbstractVector, n::Int) = zeropad!(copy(x), n)
 
-function cropto(x::AbstractVector, n::Int)
-    return n >= length(x) ? x : x[1:n]
+function zeropadresize!(x::AbstractVector, n::Int)
+    return resize!(zeropad!(x, n), n)
 end
+zeropadresize(x::AbstractVector, n::Int) = zeropadresize!(copy(x), n)
 
 #### Polynomial utilities
 
@@ -893,8 +940,8 @@ function poly(c::AbstractVector{T}, dom::Union{NTuple{2, T}, Nothing} = nothing;
     # Convert a vector of Chebyshev coefficients to a vector of monomial coefficients,
     # optionally linearly transplanted to a new domain.
     @assert !(transplant && dom === nothing) "Domain must be specified when transplanting"
-    Q = Polynomials.ChebyshevT{T, :x}(c) # polynomial in Chebyshev basis on [-1, 1]
-    P = convert(Polynomial{T, :x}, Q) # polynomial in monomial basis on [-1, 1]
+    Q = ChebyshevT{T, :x}(c) # polynomial in Chebyshev basis on [-1, 1]
+    P = Polynomial{T, :x}(Q) # polynomial in monomial basis on [-1, 1]
     if transplant
         a, b = dom
         t = Polynomial{T, :x}([-(a + b) / (b - a), 2 / (b - a)]) # polynomial mapping [a, b] -> [-1, 1]
@@ -910,12 +957,28 @@ polyder(p::Polynomial) = Polynomials.coeffs(Polynomials.derivative(p))
 polyroots(c::AbstractVector) = polyroots(Polynomial(c))
 polyroots(p::Polynomial) = complex(Polynomials.roots(p))
 
-function normalize_rational!(p::AbstractVector{T}, q::AbstractVector{T}) where {T <: AbstractFloat}
-    p ./= q[1]
-    q ./= q[1]
+function scale_rational!(p::AbstractVector{T}, q::AbstractVector{T}, q₀::T) where {T <: AbstractFloat}
+    p ./= q₀
+    q ./= q₀
     return p, q
 end
+normalize_rational!(p::AbstractVector, q::AbstractVector) = scale_rational!(p, q, first(q))
 normalize_rational(p::AbstractVector, q::AbstractVector) = normalize_rational!(copy(p), copy(q))
+
+function chebpoly_eval_at_zero(c::AbstractVector{T}) where {T <: AbstractFloat}
+    # Compute P(0) for a Chebyshev series P(x) = ∑ₖ cₖ Tₖ(x).
+    p₀ = zero(T)
+    sgn = +1
+    for k in 1:2:length(c)
+        p₀ += sgn * c[k] # Tₖ(0) = {+1 if k ≡ 0 (mod 4), -1 if k ≡ 2 (mod 4)}
+        sgn = -sgn
+    end
+    return p₀
+end
+normalize_chebpoly!(p::AbstractVector) = p ./= chebpoly_eval_at_zero(p)
+normalize_chebpoly(p::AbstractVector) = normalize_chebpoly!(copy(p))
+normalize_chebrational!(p::AbstractVector, q::AbstractVector) = scale_rational!(p, q, chebpoly_eval_at_zero(q))
+normalize_chebrational(p::AbstractVector, q::AbstractVector) = normalize_chebrational!(copy(p), copy(q))
 
 function parity(c::AbstractVector{T}; rtol = eps(T)) where {T <: AbstractFloat}
     (length(c) <= 1) && return :even # constant function
@@ -942,7 +1005,7 @@ function lazychopcoeffs(c::AbstractVector{T}; rtol::T = eps(T), atol::T = zero(T
         return @views c[1:l]
     end
 end
-chopcoeffs(c::AbstractVector; kwargs...) = collect(lazychopcoeffs(c; kwargs...))
+chopcoeffs(c::AbstractVector; kwargs...) = convert(Vector, lazychopcoeffs(c; kwargs...))
 chopcoeffs(fun::Fun; kwargs...) = Fun(space(fun), chopcoeffs(coefficients(fun); kwargs...))
 
 function lazyparitychop(c::AbstractVector, parity::Symbol)
@@ -954,7 +1017,7 @@ function lazyparitychop(c::AbstractVector, parity::Symbol)
     end
     return @views c[1:M+1]
 end
-paritychop(c::AbstractVector, parity::Symbol) = collect(lazyparitychop(c, parity))
+paritychop(c::AbstractVector, parity::Symbol) = convert(Vector, lazyparitychop(c, parity))
 
 # Crude bound on infinity norm of `fun`
 vscale(fun::Fun) = vscale(coefficients(fun))

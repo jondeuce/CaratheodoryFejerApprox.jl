@@ -1,7 +1,7 @@
 using CaratheodoryFejerApprox
 
 using ApproxFun: Chebyshev, Fun, Interval
-using CaratheodoryFejerApprox: check_endpoints, lazychopcoeffs, parity
+using CaratheodoryFejerApprox: check_endpoints, lazychopcoeffs, parity, normalize_rational
 using Statistics: mean
 
 rand_uniform(a::T, b::T) where {T} = a + (b - a) * rand(T)
@@ -14,11 +14,8 @@ cheb_interval(::Type{T}, dom) where {T} = Chebyshev(Interval(float(T).(check_end
 
 build_fun(f::Base.Callable, dom::Tuple = (-1, 1)) = Fun(f, cheb_interval(dom))
 build_fun(a::AbstractArray, dom::Tuple = (-1, 1)) = Fun(cheb_interval(float(eltype(a)), dom), float(a))
-build_fun((p, q)::NTuple{2, <:AbstractArray}, dom::Tuple = (-1, 1)) = build_fun.(normalize_rat(p, q), (dom,))
+build_fun((p, q)::NTuple{2, <:AbstractArray}, dom::Tuple = (-1, 1)) = build_fun.(normalize_rational(p, q), (dom,))
 build_fun(dom::Tuple = (-1, 1)) = a -> build_fun(a, dom)
-
-normalize_rat(p::AbstractVector, q::AbstractVector) = p ./ q[1], q ./ q[1]
-normalize_rat((p, q)::Tuple) = normalize_rat(p, q)
 
 function compare_chebcoeffs(a1::AbstractVector{T}, a2::AbstractVector{T}; atol, rtol, parity = :generic) where {T <: AbstractFloat}
     # Compare Chebyshev coefficients of two polynomials

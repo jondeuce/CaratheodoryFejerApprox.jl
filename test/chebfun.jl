@@ -65,8 +65,8 @@ end
         p, q, s = chebfuncf(fstr, dom, m, n; parity)
         p̂, q̂, ŝ = rationalcf(f, dom, m, n; parity, vscale = 1.0)
 
-        p, q = normalize_rat(p, q)
-        p̂, q̂ = normalize_rat(p̂, q̂)
+        p, q = normalize_rational(p, q)
+        p̂, q̂ = normalize_rational(p̂, q̂)
 
         # If the approximant is too close to exact, then the coefficients are not
         # not unique in machine precision, and we will get spurious failures,
