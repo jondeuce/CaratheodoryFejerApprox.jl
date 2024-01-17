@@ -46,15 +46,57 @@ using Arpack: Arpack, eigs
 using FFTW: FFTW, irfft, rfft
 using GenericFFT: GenericFFT # defines generic methods for FFTs
 using GenericLinearAlgebra: GenericLinearAlgebra # defines generic method for `LinearAlgebra.eigen` and `Polynomials.roots`
-using LinearAlgebra: LinearAlgebra, Hermitian, cond, diag, dot, eigen, ldiv!, mul!, qr!
+using LinearAlgebra: LinearAlgebra, Hermitian, cholesky!, cond, diag, dot, eigen, ldiv!, mul!, qr!
 using Polynomials: Polynomials, ChebyshevT, Polynomial
 using Setfield: Setfield, @set!
 using Statistics: Statistics, mean, std
 using ToeplitzMatrices: ToeplitzMatrices, Toeplitz, Hankel
 
-export polynomialcf, rationalcf
+export minimax, polynomialcf, rationalcf
+export chebcoeffs, monocoeffs
+
+struct RationalApproximant{T <: AbstractFloat}
+    p::AbstractVector{T}
+    q::AbstractVector{T}
+    dom::NTuple{2, T}
+    err::T
+end
+PolynomialApproximant(p::AbstractVector{T}, dom::NTuple{2, T}, err::T) where {T <: AbstractFloat} = RationalApproximant(p, ones(T, 1), dom, err)
+
+Base.Tuple(rat::RationalApproximant) = (rat.p, rat.q, rat.dom, rat.err)
+Base.NamedTuple(rat::RationalApproximant) = (; rat.p, rat.q, rat.dom, rat.err)
+Base.iterate(rat::RationalApproximant, state...) = iterate(Tuple(rat), state...)
+
+function monocoeffs(rat::RationalApproximant{T1}, ::Type{T2} = BigFloat; transplant = true) where {T1 <: AbstractFloat, T2 <: AbstractFloat}
+    p′ = poly(T2.(rat.p), T2.(rat.dom); transplant)
+    q′ = poly(T2.(rat.q), T2.(rat.dom); transplant)
+    p′, q′ = normalize_rational!(p′, q′)
+    return T1.(p′), T1.(q′)
+end
+chebcoeffs(rat::RationalApproximant) = (rat.p, rat.q)
+
+function Base.show(io::IO, rat::RationalApproximant{T}) where {T <: AbstractFloat}
+    (; p, q, dom, err) = rat
+    m, n = length(p) - 1, length(q) - 1
+    rnd = x -> round(Float64(x); sigdigits = 4)
+    is_unit = dom == (-1, 1)
+    var = is_unit ? :x : :t
+    μ, σ = is_unit ? (zero(T), one(T)) : (rnd((dom[1] + dom[2]) / 2), rnd((dom[2] - dom[1]) / 2))
+    num, den = ChebyshevT{Float64, var}(rnd.(p)), ChebyshevT{Float64, var}(rnd.(q))
+    println(io, "RationalApproximant{", T, "}")
+    println(io, "  Type:   (m, n) = (", m, ", ", n, ")")
+    println(io, "  Domain: ", rnd(dom[1]), " ≤ x ≤ ", rnd(dom[2]))
+    println(io, "  Error:  |f(x) - ", (n == 0 ? "p(x)" : "p(x) / q(x)"), "| ⪅ ", rnd(err))
+    println(io, "  Approximant:")
+    print("      p(", var, ") = ", num)
+    n > 0 && print("\n      q(", var, ") = ", den)
+    !is_unit && print("\n  where: t = (x - ", μ, ") / ", σ)
+    return nothing
+end
 
 Base.@kwdef struct CFOptions{T <: AbstractFloat}
+    "Domain of f(x)"
+    dom::NTuple{2, T} = (-one(T), one(T))
     "Even/odd parity of f(x)"
     parity::Symbol = :generic
     "Upper bound on the maximum value of |f(x)|"
@@ -65,7 +107,7 @@ Base.@kwdef struct CFOptions{T <: AbstractFloat}
     rtolchop::T = eps(T)
     "Absolute tolerance for chopping off small coefficients"
     atolchop::T = zero(T)
-    "Tolerance for detecting rationality"
+    "Absolute tolerance for detecting rationality"
     atolrat::T = 50 * eps(T)
     "Relative tolerance for Fourier integrals"
     rtolfft::T = 50 * eps(T)
@@ -74,35 +116,34 @@ Base.@kwdef struct CFOptions{T <: AbstractFloat}
     "Maximum FFT length"
     maxnfft::Int = 2^20
     "Relative tolerance for detecting ill-conditioning"
-    rtolcond::T = 1e13
+    rtolcond::T = 1 / (500 * eps(T))
     "Absolute tolerance for detecting ill-conditioning"
-    atolcond::T = 1e3
-    "Attempt to polish the approximant coefficients such that a true minimax approximation is obtained"
-    polish::Bool = false
+    atolcond::T = T(1000)
     "Suppress warnings"
     quiet::Bool = false
 end
+const CFOptionsFieldnames = Symbol[fieldnames(CFOptions)...]
 
+CFOptions(c::AbstractVector{T}, dom::Tuple; kwargs...) where {T <: AbstractFloat} = CFOptions{T}(; dom = check_endpoints(T.(dom)), parity = parity(c), vscale = vscale(c), kwargs...)
 CFOptions(o::CFOptions{T}, c::AbstractVector{T}) where {T <: AbstractFloat} = (@set! o.parity = parity(c); @set! o.vscale = vscale(c); return o)
-CFOptions(c::AbstractVector{T}; kwargs...) where {T <: AbstractFloat} = CFOptions{T}(; parity = parity(c), vscale = vscale(c), kwargs...)
 
-polynomialcf(fun::Fun, m::Int; kwargs...) = polynomialcf(coefficients(check_fun(fun)), m; kwargs...)
-polynomialcf(c::AbstractVector{<:AbstractFloat}, m::Int; kwargs...) = polynomialcf(c, m, CFOptions(c; kwargs...))
-
-polynomialcf(f, dom::Tuple, m::Int; kwargs...) = polynomialcf(Fun(f, Chebyshev(Interval(dom...))), m; kwargs...)
 polynomialcf(f, m::Int; kwargs...) = polynomialcf(Fun(f), m; kwargs...)
+polynomialcf(f, dom::Tuple, m::Int; kwargs...) = polynomialcf(Fun(f, Chebyshev(Interval(dom...))), m; kwargs...)
+polynomialcf(fun::Fun, m::Int; kwargs...) = polynomialcf(coefficients_and_endpoints(fun)..., m; kwargs...)
+polynomialcf(c::AbstractVector{T}, m::Int; kwargs...) where {T <: AbstractFloat} = polynomialcf(c, (-one(T), one(T)), m; kwargs...)
+polynomialcf(c::AbstractVector{T}, dom::Tuple, m::Int; kwargs...) where {T <: AbstractFloat} = polynomialcf(c, m, CFOptions(c, dom; kwargs...))
 
-rationalcf(fun::Fun, m::Int, n::Int; kwargs...) = rationalcf(coefficients(check_fun(fun)), m, n; kwargs...)
-rationalcf(c::AbstractVector{<:AbstractFloat}, m::Int, n::Int; kwargs...) = rationalcf(c, m, n, CFOptions(c; kwargs...))
-
-rationalcf(f, dom::Tuple, m::Int, n::Int; kwargs...) = rationalcf(Fun(f, Chebyshev(Interval(dom...))), m, n; kwargs...)
 rationalcf(f, m::Int, n::Int; kwargs...) = rationalcf(Fun(f), m, n; kwargs...)
+rationalcf(f, dom::Tuple, m::Int, n::Int; kwargs...) = rationalcf(Fun(f, Chebyshev(Interval(dom...))), m, n; kwargs...)
+rationalcf(fun::Fun, m::Int, n::Int; kwargs...) = rationalcf(coefficients_and_endpoints(fun)..., m, n; kwargs...)
+rationalcf(c::AbstractVector{T}, m::Int, n::Int; kwargs...) where {T <: AbstractFloat} = rationalcf(c, (-one(T), one(T)), m, n; kwargs...)
+rationalcf(c::AbstractVector{T}, dom::Tuple, m::Int, n::Int; kwargs...) where {T <: AbstractFloat} = rationalcf(c, m, n, CFOptions(c, dom; kwargs...))
 
 function polynomialcf(c::AbstractVector{T}, m::Int, o::CFOptions) where {T <: AbstractFloat}
     @assert !isempty(c) "Chebyshev coefficient vector must be non-empty"
     @assert 0 <= m "Requested polynomial degree m = $(m) must be non-negative"
 
-    iszero(o.vscale) && return zeros(T, 1), zero(T) # trivial function
+    iszero(o.vscale) && return postprocess(c, zeros(T, 1), zero(T), o) # trivial function
     c = @views c[1:min(end - 1, o.maxdegree)+1] ./ o.vscale # truncate to maxdegree and normalize scale
     c = lazychopcoeffs(c; rtol = o.rtolchop, atol = o.atolchop) # view of non-negligible coefficients
     M = length(c) - 1
@@ -120,14 +161,14 @@ function polynomialcf(c::AbstractVector{T}, m::Int, o::CFOptions) where {T <: Ab
     # Trivial cases
     (m == M) && return postprocess(c, c[1:M+1], zero(T), o)
     (m == M - 1) && return postprocess(c, c[1:M], abs(c[M+1]), o)
-    (m == 0) && return polynomialcf_constant(c, o)
+    (m == 0) && return postprocess(c, polynomialcf_constant(c)..., o)
 
     if o.parity === :even
         # If f(x) is even, we can reduce the problem to polynomial approximation of g(x) = f(T₂(x))
         c′ = @views c[1:2:end]
-        p′, s = polynomialcf(c′, m ÷ 2, CFOptions(o, c′))
+        p′, _, _, s = polynomialcf(c′, m ÷ 2, CFOptions(o, c′))
         p = unzip(p′; even = true)
-        return postprocess(c, p, abs(s), o)
+        return postprocess(c, p, s, o)
     end
 
     cm = @views c[m+2:M+1]
@@ -146,12 +187,12 @@ function polynomialcf(c::AbstractVector{T}, m::Int, o::CFOptions) where {T <: Ab
     return postprocess(c, p, abs(s), o)
 end
 
-function polynomialcf_constant(c::AbstractVector{T}, o::CFOptions{T}) where {T <: AbstractFloat}
+function polynomialcf_constant(c::AbstractVector{T}) where {T <: AbstractFloat}
     M = length(c) - 1
     D, V = @views eigs_hankel(c[2:M+1]; nev = 1)
     s, u = only(D), vec(V)
     p = @views c[1] + dot(c[2:M], u[2:M]) / u[1]
-    return postprocess(c, [p], abs(s), o)
+    return [p], abs(s)
 end
 
 function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where {T <: AbstractFloat}
@@ -159,7 +200,7 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
     @assert 0 <= m "Requested numerator degree m = $(m) must be non-negative"
     @assert 0 <= n "Requested denominator degree n = $(n) must be non-negative"
 
-    iszero(o.vscale) && return zeros(T, 1), ones(T, 1), zero(T) # trivial function
+    iszero(o.vscale) && return postprocess(c, zeros(T, 1), ones(T, 1), zero(T), o) # trivial function
     c = @views c[1:min(end - 1, o.maxdegree)+1] ./ o.vscale # truncate to maxdegree and normalize scale
     c = lazychopcoeffs(c; rtol = o.rtolchop, atol = o.atolchop) # view of non-negligible coefficients
     M = length(c) - 1
@@ -184,7 +225,7 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
     if o.parity === :even
         # If f(x) is even, we can reduce the problem to rational approximation of g(x) = f(T₂(x))
         c′ = @views c[1:2:end]
-        p′, q′, s = rationalcf(c′, m ÷ 2, n ÷ 2, CFOptions(o, c′))
+        p′, q′, _, s = rationalcf(c′, m ÷ 2, n ÷ 2, CFOptions(o, c′))
         p = unzip(p′; even = true)
         q = unzip(q′; even = true)
         return postprocess(c, p, q, s, o)
@@ -205,21 +246,23 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
     reverse!(a)
 
     # Obtain eigenvalues and block structure
-    s, u, k, l, rflag = eigs_hankel_block(a, m, n; atol = o.atolrat)
-    if k > 0 || l > 0
-        if rflag
+    s, u, δ⁻, δ⁺, is_rat = eigs_hankel_block(a, m, n; atol = o.atolrat)
+    if δ⁻ > 0 || δ⁺ > 0
+        if is_rat
             # f is rational (at least up to machine precision)
-            p, q = pade(c, m - k, n - k)
+            p, q = pade(c, m - δ⁻, n - δ⁻)
             return postprocess(c, p, q, eps(T), o)
         end
 
-        n′ = n - k
-        s, u, k′, l′, _ = eigs_hankel_block(a, m + l, n′; atol = o.atolrat)
-        if k′ > 0 || l′ > 0
-            n = n + l
-            s, u, k, l, _ = eigs_hankel_block(a, m - k, n; atol = o.atolrat)
+        # Try upper-left (m + δ⁺, n - δ⁻) corner of CF table block
+        s′, u′, δ⁻′, δ⁺′, _ = eigs_hankel_block(a, m + δ⁺, n - δ⁻; atol = o.atolrat)
+        if δ⁻′ > 0 || δ⁺′ > 0
+            # Otherwise, go to lower-right (m - δ⁻, n + δ⁺) corner of CF table block
+            s, u, _, _, _ = eigs_hankel_block(a, m - δ⁻, n + δ⁺; atol = o.atolrat)
+            n = n + δ⁺
         else
-            n = n′
+            s, u = s′, u′
+            n = n - δ⁻
         end
     end
 
@@ -295,15 +338,16 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
     A = @views Γ[1:m, 1:m]
     B = @views Γ[1:m, m+1]
     C = @views Γ[1:m, end:-1:m+2]
-    G = Hermitian(A + C - (2 / γ₀) * (B * B'))
+    G = Hermitian(@. A + C - (2 / γ₀) * (B * B'))
 
     if cond(G) > max(s * o.rtolcond, o.atolcond)
         !o.quiet && @warn "Ill-conditioning detected. Results may be inaccurate"
     end
 
-    bc = @views G \ (-2 * ((c̃[1] / γ₀) * B - c̃[m+1:-1:2]))
-    bc₀ = (c̃[1] - dot(B, bc)) / γ₀
-    p = @views [bc₀; bc[end:-1:1]]
+    p = zeros(T, m + 1)
+    @views ldiv!(p[1:m], LinearAlgebra.cholesky!(G), (-2 * c̃[1] / γ₀) .* B .+ 2 .* c̃[m+1:-1:2])
+    @views p[m+1] = (c̃[1] - dot(p[1:m], B)) / γ₀
+    reverse!(p)
 
     return postprocess(c, p, q, s, o)
 end
@@ -318,8 +362,7 @@ function rationalcf_normalized_denominator(b::AbstractVector{T}; quiet::Bool = f
 
     if ρ < 1
         # Normal case; roots are all within the unit disk. Compute Chebyshev coefficients of Q(x) by expanding the product directly:
-        #   Q̃(x) = q(z)q(z⁻¹) = (∑ᵢ₌₀ⁿ bᵢ zⁱ) (∑ⱼ₌₀ⁿ bⱼ z⁻ʲ)
-        #        = ∑ᵢ,ⱼ₌₀ⁿ bᵢ bⱼ zⁱ⁻ʲ
+        #   Q̃(x) = q(z)q(z⁻¹) = (∑ᵢ₌₀ⁿ bᵢ zⁱ) (∑ⱼ₌₀ⁿ bⱼ z⁻ʲ) = ∑ᵢ,ⱼ₌₀ⁿ bᵢ bⱼ zⁱ⁻ʲ
         #        = ∑′ₖ₌₀ⁿ ∑ₗ₌ₖⁿ bₖ bₗ (zᵏ + z⁻ᵏ)    where ∑′ means k=0 term is halved
         #        = ∑′ₖ₌₀ⁿ (2 bₖ ∑ₗ₌ₖⁿ bₗ) Tₖ(x)     where Tₖ(x) = (zᵏ + z⁻ᵏ) / 2 for z ∈ ∂D⁺
         n = length(b) - 1
@@ -351,19 +394,13 @@ function rationalcf_normalized_denominator(b::AbstractVector{T}; quiet::Bool = f
 end
 
 function rationalcf_reduced(c::AbstractVector, m::Int, o::CFOptions)
-    p, s = polynomialcf(c, m, CFOptions(o, c))
-    return postprocess(c, p, [one(eltype(c))], abs(s), o)
+    p, q, _, s = polynomialcf(c, m, CFOptions(o, c))
+    return postprocess(c, p, q, s, o)
 end
 
 function postprocess(c::AbstractVector{T}, p::AbstractVector{T}, s::T, o::CFOptions{T}) where {T <: AbstractFloat}
     # Chop trailing zero coefficients to match parity
     p = paritychop(p, o.parity)
-
-    # Try to polish the coefficients to obtain true minimax approximation
-    if o.polish && s > 5 * eps(T)
-        p′, s′ = minimax(c, p, MinimaxOptions(o))
-        !isnan(s′) && ((p, s) = (p′, s′))
-    end
 
     # Clean up even/odd symmetric coefficients
     if o.parity === :even
@@ -376,7 +413,7 @@ function postprocess(c::AbstractVector{T}, p::AbstractVector{T}, s::T, o::CFOpti
     p .*= o.vscale
     s *= o.vscale
 
-    return p, s
+    return PolynomialApproximant(p, o.dom, s)
 end
 
 function postprocess(c::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T}, s::T, o::CFOptions{T}) where {T <: AbstractFloat}
@@ -385,12 +422,6 @@ function postprocess(c::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVect
         p, q = paritychop(p, :even), paritychop(q, :even)
     elseif o.parity === :odd
         p, q = paritychop(p, :odd), paritychop(q, :even)
-    end
-
-    # Try to polish the coefficients to obtain true minimax approximation
-    if o.polish && s > 5 * eps(T)
-        p′, q′, s′ = minimax(c, p, q, MinimaxOptions(o))
-        !isnan(s′) && ((p, q, s) = (p′, q′, s′))
     end
 
     # Clean up even/odd symmetric coefficients
@@ -409,40 +440,30 @@ function postprocess(c::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVect
     p .*= o.vscale
     s *= o.vscale
 
-    return p, q, s
+    return RationalApproximant(p, q, o.dom, s)
 end
 
 #### Pade
 
 function pade(c::AbstractVector{T}, m, n) where {T <: AbstractFloat}
-    M = length(c) - 1
-    l = max(m, n) # temporary degree variable in case m < n
-
     # Get the Chebyshev coefficients and pad if necessary
-    if M < m + 2n
-        # Chebfun implementation notes that using random values may be more stable than using zeros?
-        # This doesn't seem worth the non-determinism to me...
-        # a = [c; eps(T) * randn(T, m + 2n - M)]
-        a = [c; zeros(T, m + 2n + M, 1)]
-    else
-        a = copy(c)
-    end
+    l = max(m, n)
+    a = zeropadresize(c, m + n + 1) #Note: Chebfun implementation notes that using random values instead of zero padding may be more stable, but that doesn't seem worth the non-determinism
     a[1] *= 2
 
     # Set up and solve Hankel system for denominator Laurent-Pade coefficients
-    top = @views a[abs.(m-n+1:m).+1]  # Top row of Hankel system
-    bot = @views a[m+1:m+n]           # Bottom row of Hankel system
-    rhs = @views a[m+2:m+n+1]         # RHS of Hankel system
-
     if n > 0
-        β = [one(T); -reverse!(hankel(top, bot) \ rhs)]
+        top = m - n + 1 >= 0 ? a[m-n+2:m+1] : @views [a[-(m - n):-1:2]; a[1:m+1]]
+        bot = @views a[m+1:m+n]
+        rhs = @views -a[m+2:m+n+1]
+        β = [one(T); reverse!(hankel(top, bot) \ rhs)]
     else
-        β = [one(T)]
+        β = ones(T, 1)
     end
 
     # Use convolution to compute numerator Laurent-Pade coefficients
     a[1] /= 2
-    α = @views conv(a[1:l+1], β)[1:l+1] # Note: direct linear convolution is faster than FFT, since l = max(m, n) will never be very large in practice
+    α = @views conv(a[1:l+1], β, l + 1) # Note: direct linear convolution is faster than FFT, since l = max(m, n) will never be very large in practice
 
     # Compute numerator Chebyshev-Pade coefficients
     p = zeros(T, m + 1)
@@ -453,8 +474,8 @@ function pade(c::AbstractVector{T}, m, n) where {T <: AbstractFloat}
     # Compute denominator Chebyshev-Pade coefficients
     q = zeros(T, n + 1)
     q[1] = sum(abs2, β)
-    @views for k in 2:n+1
-        q[k] = 2 * dot(β[1:n+2-k], β[k:n+1])
+    for k in 2:n+1
+        q[k] = @views 2 * dot(β[1:n+2-k], β[k:n+1])
     end
 
     # Normalize the coefficients
@@ -466,6 +487,8 @@ end
 #### Minimax
 
 Base.@kwdef struct MinimaxOptions{T <: AbstractFloat}
+    "Domain of f(x)"
+    dom::NTuple{2, T} = (-one(T), one(T))
     "Even/odd parity of f(x)"
     parity::Symbol = :generic
     "Upper bound on the maximum value of |f(x)|"
@@ -483,21 +506,23 @@ Base.@kwdef struct MinimaxOptions{T <: AbstractFloat}
     "Suppress warnings"
     quiet::Bool = false
 end
+const MinimaxOptionsFieldnames = Symbol[fieldnames(MinimaxOptions)...]
 
+MinimaxOptions(c::AbstractVector{T}, dom::Tuple; kwargs...) where {T <: AbstractFloat} = MinimaxOptions{T}(; dom = check_endpoints(T.(dom)), parity = parity(c), vscale = vscale(c), kwargs...)
 MinimaxOptions(o::MinimaxOptions{T}, c::AbstractVector{T}) where {T <: AbstractFloat} = (@set! o.parity = parity(c); @set! o.vscale = vscale(c); return o)
-MinimaxOptions(c::AbstractVector{T}; kwargs...) where {T <: AbstractFloat} = MinimaxOptions{T}(; parity = parity(c), vscale = vscale(c), kwargs...)
-MinimaxOptions(o::CFOptions{T}; kwargs...) where {T <: AbstractFloat} = MinimaxOptions{T}(; o.parity, o.maxdegree, o.quiet, kwargs...)
 
 function minimax(fun::Fun, m::Int, n::Int; kwargs...)
-    p₀, q₀, _ = rationalcf(fun, m, n)
-    p, q, ε = minimax(fun, p₀, q₀; kwargs...)
-    return p, q, ε
+    p₀, q₀, _, _ = rationalcf(fun, m, n)
+    return minimax(fun, p₀, q₀; kwargs...)
 end
-minimax(fun::Fun, pq::AbstractVector...; kwargs...) = minimax(coefficients(fun), pq...; kwargs...)
-minimax(f::AbstractVector{T}, pq::AbstractVector{T}...; kwargs...) where {T <: AbstractFloat} = minimax(f, pq..., MinimaxOptions{T}(; kwargs...))
-
-minimax(f, dom::Tuple, m::Int, n::Int; kwargs...) = minimax(Fun(f, Chebyshev(Interval(dom...))), m, n; kwargs...)
 minimax(f, m::Int, n::Int; kwargs...) = minimax(Fun(f), m, n; kwargs...)
+minimax(f, dom::Tuple, m::Int, n::Int; kwargs...) = minimax(Fun(f, Chebyshev(Interval(dom...))), m, n; kwargs...)
+
+minimax(f, pq::AbstractVector...; kwargs...) = minimax(Fun(f), pq...; kwargs...)
+minimax(f, dom::Tuple, pq::AbstractVector...; kwargs...) = minimax(Fun(f, Chebyshev(Interval(dom...))), pq...; kwargs...)
+minimax(fun::Fun, pq::AbstractVector...; kwargs...) = minimax(coefficients_and_endpoints(fun)..., pq...; kwargs...)
+minimax(f::AbstractVector{T}, pq::AbstractVector{T}...; kwargs...) where {T <: AbstractFloat} = minimax(f, (-one(T), one(T)), pq...; kwargs...)
+minimax(f::AbstractVector{T}, dom::Tuple, pq::AbstractVector{T}...; kwargs...) where {T <: AbstractFloat} = minimax(f, pq..., MinimaxOptions(f, dom; kwargs...))
 
 struct PolynomialMinimaxWorkspace{T <: AbstractFloat}
     f::Vector{T}
@@ -514,7 +539,7 @@ function PolynomialMinimaxWorkspace(f::AbstractVector{T}, p::AbstractVector{T}, 
     m = length(p) - 1
     nx = m + 2
     (o.parity === :even || o.parity === :odd) && (nx += 1) # extra root expected for even/odd symmetry
-    f, p = collect(f), collect(p)
+    f, p = Vector(f), Vector(p)
     f = f[1:min(end - 1, o.maxdegree)+1] # truncate to maxdegree
     Eₓ, Sₓ, δp_δε = ntuple(_ -> zeros(T, nx), 3)
     J, rhs = zeros(T, nx, m + 2), zeros(T, nx)
@@ -550,7 +575,7 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T
                 (εmax <= 50 * eps(T) * max(vscale(f), one(T))) && return p, εmax # initial approximant is sufficiently accurate
                 !o.quiet && @warn "Initial polynomial approximant is not good enough to initialize minimax fine-tuning"
             end
-            !o.quiet && @warn "Found $(nx₀) local extrema for type ($m, $n) $(o.parity) polynomial approximant, but expected $(nx)"
+            !o.quiet && @warn "Found $(nx₀) local extrema for degree $(m) $(o.parity) polynomial approximant, but expected $(nx)"
             return p, T(NaN)
         end
 
@@ -599,9 +624,9 @@ function RationalMinimaxWorkspace(f::AbstractVector{T}, p::AbstractVector{T}, q:
     m, n = length(p) - 1, length(q) - 1
     nx = m + n + 2
     (o.parity === :even || o.parity === :odd) && (nx += 1) # extra root expected for even/odd symmetry
-    f, p, q = collect(f), collect(p), collect(q)
+    f, p, q = Vector(f), Vector(p), Vector(q)
     f = f[1:min(end - 1, o.maxdegree)+1] # truncate to maxdegree
-    normalize_rational!(p, q)
+    normalize_chebrational!(p, q) # normalize such that Q(0) = 1
     Pₓ, Qₓ, Eₓ, Sₓ, δp_δq_δε = ntuple(_ -> zeros(T, nx), 5)
     J, rhs = zeros(T, nx, m + n + 2), zeros(T, nx) # J may have more rows than columns for symmetric inputs
     return RationalMinimaxWorkspace(f, p, q, Pₓ, Qₓ, Eₓ, Sₓ, δp_δq_δε, J, rhs, o.stepsize)
@@ -641,7 +666,7 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T
                 (εmax <= 50 * eps(T) * max(vscale(f), one(T))) && return p, q, εmax # approximant is sufficiently accurate
                 !o.quiet && @warn "Initial rational approximant is not good enough to initialize minimax fine-tuning"
             end
-            !o.quiet && @warn "Found $(nx₀) local extrema for type ($m, $n) $(o.parity) rational approximant, but expected $(nx)"
+            !o.quiet && @warn "Found $(nx₀) local extrema for type $((m, n)) $(o.parity) rational approximant, but expected $(nx)"
             return p, q, T(NaN)
         end
 
@@ -662,6 +687,7 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T
         δε = δp_δq_δε[m+n+2]
         @. p += γ * δp
         @. q[2:n+1] += γ * δq
+        normalize_chebrational!(p, q) # renormalize to Q(0) = 1
 
         if abs(δε) <= max(o.rtol * ε, o.atol) || maximum(abs, δp) <= max(o.rtol * maximum(abs, p), o.atol) || maximum(abs, δq) <= max(o.rtol * maximum(abs, q), o.atol)
             # Newton step is small enough, so we're done
@@ -757,7 +783,7 @@ end
 
 function minimax_reduced(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T}) where {T <: AbstractFloat}
     p, ε = minimax(f, p, o)
-    return p, [one(T)], T(ε)
+    return p, ones(T, 1), T(ε)
 end
 
 function minimax_constant_polynomial(f::AbstractVector{T}) where {T <: AbstractFloat}
@@ -767,7 +793,7 @@ end
 
 function minimax_constant_rational(f::AbstractVector{T}) where {T <: AbstractFloat}
     p, ε = minimax_constant_polynomial(f)
-    return p, [one(T)], T(ε)
+    return p, ones(T, 1), T(ε)
 end
 
 function check_signs(S; quiet = false)
@@ -806,11 +832,12 @@ end
     return ifelse(r² == 0, one(w), w)
 end
 
-function conv(a::AbstractVector, b::AbstractVector)
+function conv(a::AbstractVector, b::AbstractVector, L::Int = length(a) + length(b) - 1)
     N, M = length(a), length(b)
+    @assert 0 <= L <= N + M - 1 "Invalid output length"
     T = typeof(one(eltype(a)) * one(eltype(b)))
-    c = zeros(T, N + M - 1)
-    for i in 1:N, j in 1:M
+    c = zeros(T, L)
+    for i in 1:N, j in 1:min(M, L - i + 1)
         c[i+j-1] += a[i] * b[j]
     end
     return c
@@ -875,20 +902,20 @@ function eigs_hankel_block(a::AbstractVector{T}, m, n; atol = 50 * eps(T)) where
     s = D[n+1]
     u = V[:, n+1]
 
-    k = 0
-    while k < n && abs(abs(D[n-k]) - abs(s)) < atol
-        k += 1
+    δ⁻ = 0
+    while δ⁻ < n && abs(abs(D[n-δ⁻]) - abs(s)) < atol
+        δ⁻ += 1
     end
 
-    l = 0
-    while n + l + 2 < nev && abs(abs(D[n+l+2]) - abs(s)) < atol
-        l += 1
+    δ⁺ = 0
+    while n + δ⁺ + 2 < nev && abs(abs(D[n+δ⁺+2]) - abs(s)) < atol
+        δ⁺ += 1
     end
 
     # Flag indicating if the function is actually rational
-    rFlag = n + l + 2 == nev
+    is_rat = n + δ⁺ + 2 == nev
 
-    return s, u, k, l, rFlag
+    return s, u, δ⁻, δ⁺, is_rat
 end
 
 #### Helper functions
@@ -927,23 +954,21 @@ function zeropad!(x::AbstractVector, n::Int)
     resize!(x, n)[nx+1:end] .= zero(eltype(x))
     return x
 end
-zeropad(x::AbstractVector, n::Int) = zeropad!(copy(x), n)
+zeropad(x::AbstractVector, n::Int) = zeropad!(x[1:min(end, n)], n)
 
-function zeropadresize!(x::AbstractVector, n::Int)
-    return resize!(zeropad!(x, n), n)
-end
-zeropadresize(x::AbstractVector, n::Int) = zeropadresize!(copy(x), n)
+zeropadresize!(x::AbstractVector, n::Int) = resize!(zeropad!(x, n), n)
+zeropadresize(x::AbstractVector, n::Int) = zeropadresize!(x[1:min(end, n)], n)
 
 #### Polynomial utilities
 
-function poly(c::AbstractVector{T}, dom::Union{NTuple{2, T}, Nothing} = nothing; transplant = dom !== nothing) where {T}
+function poly(c::AbstractVector{T}, dom::Tuple = (-1, 1); transplant = dom != (-1, 1)) where {T}
     # Convert a vector of Chebyshev coefficients to a vector of monomial coefficients,
     # optionally linearly transplanted to a new domain.
-    @assert !(transplant && dom === nothing) "Domain must be specified when transplanting"
+    @assert length(dom) == 2 "Domain must be a tuple of length 2"
     Q = ChebyshevT{T, :x}(c) # polynomial in Chebyshev basis on [-1, 1]
     P = Polynomial{T, :x}(Q) # polynomial in monomial basis on [-1, 1]
-    if transplant
-        a, b = dom
+    if transplant && dom != (-1, 1)
+        a, b = T.(dom)
         t = Polynomial{T, :x}([-(a + b) / (b - a), 2 / (b - a)]) # polynomial mapping [a, b] -> [-1, 1]
         P = P(t) # polynomial in monomial basis on [a, b]
     end
