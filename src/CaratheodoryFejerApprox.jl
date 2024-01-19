@@ -9,6 +9,7 @@ As well as the following files from Chebfun v5:
 
     chebfun/@chebfun/cf.m
     chebfun/@chebfun/chebpade.m
+    chebfun/@chebtech/roots.m
 
 Chebfun v5 is distributed under the following license:
 
@@ -40,28 +41,38 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 module CaratheodoryFejerApprox
 
-using ApproxFun: ApproxFun, Chebyshev, ChebyshevInterval, Fun, Interval, coefficients, domain, endpoints, ncoefficients, space
+using ApproxFun: ApproxFun, Chebyshev, ChebyshevInterval, ClosedInterval, Fun, Interval, coefficients, domain, endpoints, extrapolate, ncoefficients, space
 using ArnoldiMethod: ArnoldiMethod, partialschur
 using Arpack: Arpack, eigs
+using DoubleFloats: DoubleFloats, Double64
 using FFTW: FFTW, irfft, rfft
 using GenericFFT: GenericFFT # defines generic methods for FFTs
 using GenericLinearAlgebra: GenericLinearAlgebra # defines generic method for `LinearAlgebra.eigen` and `Polynomials.roots`
-using LinearAlgebra: LinearAlgebra, Hermitian, cholesky!, cond, diag, dot, eigen, ldiv!, mul!, qr!
+using LinearAlgebra: LinearAlgebra, Hermitian, cholesky!, cond, diag, dot, eigen, eigvals, ldiv!, mul!, qr!
 using Polynomials: Polynomials, ChebyshevT, Polynomial
 using Setfield: Setfield, @set!
-using Statistics: Statistics, mean, std
 using ToeplitzMatrices: ToeplitzMatrices, Toeplitz, Hankel
 
 export minimax, polynomialcf, rationalcf
 export chebcoeffs, monocoeffs
 
 struct RationalApproximant{T <: AbstractFloat}
-    p::AbstractVector{T}
-    q::AbstractVector{T}
+    p::Vector{T}
+    q::Vector{T}
     dom::NTuple{2, T}
     err::T
 end
 PolynomialApproximant(p::AbstractVector{T}, dom::NTuple{2, T}, err::T) where {T <: AbstractFloat} = RationalApproximant(p, ones(T, 1), dom, err)
+
+function (res::RationalApproximant{T})(x) where {T <: AbstractFloat}
+    pₓ = build_fun(T, res.p, res.dom)(T(x))
+    if length(res.q) <= 1
+        return pₓ
+    else
+        qₓ = build_fun(T, res.q, res.dom)(T(x))
+        return pₓ / qₓ
+    end
+end
 
 Base.Tuple(rat::RationalApproximant) = (rat.p, rat.q, rat.dom, rat.err)
 Base.NamedTuple(rat::RationalApproximant) = (; rat.p, rat.q, rat.dom, rat.err)
@@ -127,14 +138,14 @@ const CFOptionsFieldnames = Symbol[fieldnames(CFOptions)...]
 CFOptions(c::AbstractVector{T}, dom::Tuple; kwargs...) where {T <: AbstractFloat} = CFOptions{T}(; dom = check_endpoints(T.(dom)), parity = parity(c), vscale = vscale(c), kwargs...)
 CFOptions(o::CFOptions{T}, c::AbstractVector{T}) where {T <: AbstractFloat} = (@set! o.parity = parity(c); @set! o.vscale = vscale(c); return o)
 
-polynomialcf(f, m::Int; kwargs...) = polynomialcf(Fun(f), m; kwargs...)
-polynomialcf(f, dom::Tuple, m::Int; kwargs...) = polynomialcf(Fun(f, Chebyshev(Interval(dom...))), m; kwargs...)
+polynomialcf(f, m::Int; kwargs...) = polynomialcf(build_fun(f), m; kwargs...)
+polynomialcf(f, dom::Tuple, m::Int; kwargs...) = polynomialcf(build_fun(f, dom), m; kwargs...)
 polynomialcf(fun::Fun, m::Int; kwargs...) = polynomialcf(coefficients_and_endpoints(fun)..., m; kwargs...)
 polynomialcf(c::AbstractVector{T}, m::Int; kwargs...) where {T <: AbstractFloat} = polynomialcf(c, (-one(T), one(T)), m; kwargs...)
 polynomialcf(c::AbstractVector{T}, dom::Tuple, m::Int; kwargs...) where {T <: AbstractFloat} = polynomialcf(c, m, CFOptions(c, dom; kwargs...))
 
-rationalcf(f, m::Int, n::Int; kwargs...) = rationalcf(Fun(f), m, n; kwargs...)
-rationalcf(f, dom::Tuple, m::Int, n::Int; kwargs...) = rationalcf(Fun(f, Chebyshev(Interval(dom...))), m, n; kwargs...)
+rationalcf(f, m::Int, n::Int; kwargs...) = rationalcf(build_fun(f), m, n; kwargs...)
+rationalcf(f, dom::Tuple, m::Int, n::Int; kwargs...) = rationalcf(build_fun(f, dom), m, n; kwargs...)
 rationalcf(fun::Fun, m::Int, n::Int; kwargs...) = rationalcf(coefficients_and_endpoints(fun)..., m, n; kwargs...)
 rationalcf(c::AbstractVector{T}, m::Int, n::Int; kwargs...) where {T <: AbstractFloat} = rationalcf(c, (-one(T), one(T)), m, n; kwargs...)
 rationalcf(c::AbstractVector{T}, dom::Tuple, m::Int, n::Int; kwargs...) where {T <: AbstractFloat} = rationalcf(c, m, n, CFOptions(c, dom; kwargs...))
@@ -143,8 +154,9 @@ function polynomialcf(c::AbstractVector{T}, m::Int, o::CFOptions) where {T <: Ab
     @assert !isempty(c) "Chebyshev coefficient vector must be non-empty"
     @assert 0 <= m "Requested polynomial degree m = $(m) must be non-negative"
 
-    iszero(o.vscale) && return postprocess(c, zeros(T, 1), zero(T), o) # trivial function
-    c = @views c[1:min(end - 1, o.maxdegree)+1] ./ o.vscale # truncate to maxdegree and normalize scale
+    iszero(o.vscale) && return postprocess(zeros(T, 1), zero(T), o) # trivial function
+    c = c[1:min(end - 1, o.maxdegree)+1] # truncate to maxdegree
+    c ./= o.vscale # normalize scale such that max|f(x)| ≈ 1
     c = lazychopcoeffs(c; rtol = o.rtolchop, atol = o.atolchop) # view of non-negligible coefficients
     M = length(c) - 1
     m = min(m, M)
@@ -159,21 +171,21 @@ function polynomialcf(c::AbstractVector{T}, m::Int, o::CFOptions) where {T <: Ab
     end
 
     # Trivial cases
-    (m == M) && return postprocess(c, c[1:M+1], zero(T), o)
-    (m == M - 1) && return postprocess(c, c[1:M], abs(c[M+1]), o)
-    (m == 0) && return postprocess(c, polynomialcf_constant(c)..., o)
+    (m == M) && return postprocess(c[1:M+1], zero(T), o)
+    (m == M - 1) && return postprocess(c[1:M], abs(c[M+1]), o)
+    (m == 0) && return polynomialcf_constant(c, o)
 
     if o.parity === :even
         # If f(x) is even, we can reduce the problem to polynomial approximation of g(x) = f(T₂(x))
         c′ = @views c[1:2:end]
-        p′, _, _, s = polynomialcf(c′, m ÷ 2, CFOptions(o, c′))
+        p′, _, _, λ = polynomialcf(c′, m ÷ 2, CFOptions(o, c′))
         p = unzip(p′; even = true)
-        return postprocess(c, p, s, o)
+        return postprocess(p, λ, o)
     end
 
     cm = @views c[m+2:M+1]
     D, V = eigs_hankel(cm; nev = 1)
-    s, u = only(D), vec(V)
+    λ, u = only(D), vec(V)
 
     u1 = u[1]
     uu = @views u[2:M-m]
@@ -184,15 +196,15 @@ function polynomialcf(c::AbstractVector{T}, m::Int, o::CFOptions) where {T <: Ab
     @views b[m+2:2m+1] .+= b[m:-1:1]
     p = @views c[1:m+1] - b[m+1:2m+1]
 
-    return postprocess(c, p, abs(s), o)
+    return postprocess(p, abs(λ), o)
 end
 
-function polynomialcf_constant(c::AbstractVector{T}) where {T <: AbstractFloat}
+function polynomialcf_constant(c::AbstractVector{T}, o::CFOptions{T}) where {T <: AbstractFloat}
     M = length(c) - 1
     D, V = @views eigs_hankel(c[2:M+1]; nev = 1)
-    s, u = only(D), vec(V)
+    λ, u = only(D), vec(V)
     p = @views c[1] + dot(c[2:M], u[2:M]) / u[1]
-    return [p], abs(s)
+    return postprocess([p], abs(λ), o)
 end
 
 function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where {T <: AbstractFloat}
@@ -200,8 +212,9 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
     @assert 0 <= m "Requested numerator degree m = $(m) must be non-negative"
     @assert 0 <= n "Requested denominator degree n = $(n) must be non-negative"
 
-    iszero(o.vscale) && return postprocess(c, zeros(T, 1), ones(T, 1), zero(T), o) # trivial function
-    c = @views c[1:min(end - 1, o.maxdegree)+1] ./ o.vscale # truncate to maxdegree and normalize scale
+    iszero(o.vscale) && return postprocess(zeros(T, 1), ones(T, 1), zero(T), o) # trivial function
+    c = c[1:min(end - 1, o.maxdegree)+1] # truncate to maxdegree
+    c ./= o.vscale # normalize scale such that max|f(x)| ≈ 1
     c = lazychopcoeffs(c; rtol = o.rtolchop, atol = o.atolchop) # view of non-negligible coefficients
     M = length(c) - 1
     m = min(m, M)
@@ -225,10 +238,10 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
     if o.parity === :even
         # If f(x) is even, we can reduce the problem to rational approximation of g(x) = f(T₂(x))
         c′ = @views c[1:2:end]
-        p′, q′, _, s = rationalcf(c′, m ÷ 2, n ÷ 2, CFOptions(o, c′))
+        p′, q′, _, λ = rationalcf(c′, m ÷ 2, n ÷ 2, CFOptions(o, c′))
         p = unzip(p′; even = true)
         q = unzip(q′; even = true)
-        return postprocess(c, p, q, s, o)
+        return postprocess(p, q, λ, o)
     end
 
     # Now, for even/odd symmetric functions, although we adjusted (m, n) above to respect the function symmetry,
@@ -246,23 +259,23 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
     reverse!(a)
 
     # Obtain eigenvalues and block structure
-    s, u, δ⁻, δ⁺, is_rat = eigs_hankel_block(a, m, n; atol = o.atolrat)
-    if δ⁻ > 0 || δ⁺ > 0
+    λ, u, k, l, is_rat = eigs_hankel_block(a, m, n; atol = o.atolrat)
+    if k > 0 || l > 0
         if is_rat
             # f is rational (at least up to machine precision)
-            p, q = pade(c, m - δ⁻, n - δ⁻)
-            return postprocess(c, p, q, eps(T), o)
+            p, q = pade(c, m - k, n - k)
+            return postprocess(p, q, eps(T), o)
         end
 
-        # Try upper-left (m + δ⁺, n - δ⁻) corner of CF table block
-        s′, u′, δ⁻′, δ⁺′, _ = eigs_hankel_block(a, m + δ⁺, n - δ⁻; atol = o.atolrat)
+        # Try upper-left (m + l, n - k) corner of CF table block
+        s′, u′, δ⁻′, δ⁺′, _ = eigs_hankel_block(a, m + l, n - k; atol = o.atolrat)
         if δ⁻′ > 0 || δ⁺′ > 0
-            # Otherwise, go to lower-right (m - δ⁻, n + δ⁺) corner of CF table block
-            s, u, _, _, _ = eigs_hankel_block(a, m - δ⁻, n + δ⁺; atol = o.atolrat)
-            n = n + δ⁺
+            # Otherwise, go to lower-right (m - k, n + l) corner of CF table block
+            λ, u, _, _, _ = eigs_hankel_block(a, m - k, n + l; atol = o.atolrat)
+            n = n + l
         else
-            s, u = s′, u′
-            n = n - δ⁻
+            λ, u = s′, u′
+            n = n - k
         end
     end
 
@@ -282,10 +295,10 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
         ((N *= 2) > o.maxnfft || (Δc̃ < √o.rtolfft * maximum(abs, c̃) && Δc̃ > Δc̃_prev / 2) || isapprox(c̃, c̃_prev; rtol = o.rtolfft)) && break
     end
 
-    @views c̃ .= a[end:-1:end-m] .- s .* c̃ # (eqn. 1.7b[2])
-    s = abs(s)
+    @views c̃ .= a[end:-1:end-m] .- λ .* c̃ # (eqn. 1.7b[2])
+    λ = abs(λ)
 
-    # Compute the polynomial q(z) via incomplete factorization (sec. 3.2[3]) of the denominator of the Blaschke product b(z) (eqn. 1.6b[2]).
+    # Compute the polynomial q₁(z) via incomplete factorization (sec. 3.2[3]) of the denominator of the Blaschke product b(z) (eqn. 1.6b[2]).
     # This is done by computing the Laurent coefficients of p'(z) / p(z) via FFT, where p(z) is the numerator of b(z),
     # noting that the numerator of b(z) is the reciprocal polynomial zⁿ⋅b(z⁻¹) of the denominator.
     N = max(nextpow(2, length(u)), o.minnfft)
@@ -295,30 +308,29 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
     Δs̃ = T(Inf)
     while true
         s̃_prev, s̃ = s̃, s̃_prev
-        @views s̃ .= incomplete_poly_fact_laurent_coeffs(u, ud, N)[end-n:end-1]
+        @views s̃ .= incomplete_factorization_laurent_coeffs(u, ud, N)[end-n:end-1]
         Δs̃_prev, Δs̃ = Δs̃, maximum(abs, s̃ - s̃_prev)
         ((N *= 2) > o.maxnfft || (Δs̃ < √o.rtolfft * maximum(abs, s̃) && Δs̃ > Δs̃_prev / 2) || isapprox(s̃, s̃_prev; rtol = o.rtolfft)) && break
     end
 
-    # Compute coefficients bᵢ of the incomplete factorization q(z) = ∑ᵢ₌₀ⁿ bᵢzⁱ (eqn. 3.11[3])
+    # Compute coefficients of the incomplete factorization q₁(z) = ∑ᵢ₌₀ⁿ bᵢzⁱ (eqn. 3.11[3])
     b = ones(T, n + 1)
     for j in 1:n
         b[j+1] = @views -dot(b[1:j], s̃[end-j+1:end]) / j
     end
     reverse!(b)
 
-    # Compute the Chebyshev coefficients of the polynomial Q(x) = q(z)q(z⁻¹)/τ = |q(z)|²/τ (eqn. 1.10[2]) where z ∈ ∂D⁺ and τ = q(i)q(-i).
-    q, ρ = rationalcf_normalized_denominator(b; o.quiet)
+    # Compute the Chebyshev coefficients of the polynomial Q(x) = q₁(z)q₁(z⁻¹)/τ = |q₁(z)|²/τ (eqn. 1.10[2]) where z ∈ ∂D⁺ and τ = q₁(i)q₁(-i).
+    q, ρ = normalized_symmetric_laurent_product(b; o.quiet)
     n = length(q) - 1 # denominator degree may change in degenerate cases
-    Q = Fun(ChebyshevInterval{T}(), q)
+    Q = Fun(ChebSpace(T), q)
 
     # Compute numerator polynomial from Chebyshev expansion of 1/Q(x) and R̃(x)
     if n > 0
-        # We know the exact ellipse of analyticity for 1/Q(x), so use this knowledge to
-        # obtain its Chebyshev coefficients:
+        # We know the exact ellipse of analyticity for 1/Q(x), so use this knowledge to obtain its Chebyshev coefficients:
         ρ⁻¹ = inv(clamp(ρ, eps(T), 1 - eps(T)))
         nq⁻¹ = ceil(Int, log(4 / eps(T) / (ρ⁻¹ - 1)) / log(ρ⁻¹))
-        Q⁻¹ = Fun(x -> inv(Q(x)), ChebyshevInterval{T}(), min(nq⁻¹, o.maxdegree))
+        Q⁻¹ = Fun(x -> inv(Q(x)), ChebSpace(T), min(nq⁻¹, o.maxdegree))
         γ = zeropadresize!(coefficients(Q⁻¹), 2m + 1)
     else
         γ = zeros(T, 2m + 1)
@@ -329,7 +341,7 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
 
     if m == 0
         p = [c̃[1] / γ₀]
-        return postprocess(c, p, q, s, o)
+        return postprocess(p, q, λ, o)
     end
 
     # The following steps reduce the Toeplitz system of size 2*m + 1 to a system of
@@ -340,7 +352,7 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
     C = @views Γ[1:m, end:-1:m+2]
     G = Hermitian(@. A + C - (2 / γ₀) * (B * B'))
 
-    if cond(G) > max(s * o.rtolcond, o.atolcond)
+    if cond(G) > max(λ * o.rtolcond, o.atolcond)
         !o.quiet && @warn "Ill-conditioning detected. Results may be inaccurate"
     end
 
@@ -349,20 +361,26 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
     @views p[m+1] = (c̃[1] - dot(p[1:m], B)) / γ₀
     reverse!(p)
 
-    return postprocess(c, p, q, s, o)
+    return postprocess(p, q, λ, o)
 end
 
-function rationalcf_normalized_denominator(b::AbstractVector{T}; quiet::Bool = false) where {T <: AbstractFloat}
+function rationalcf_reduced(c::AbstractVector, m::Int, o::CFOptions)
+    p, q, _, λ = polynomialcf(c, m, CFOptions(o, c))
+    return postprocess(p, q, λ, o)
+end
+
+function normalized_symmetric_laurent_product(b::AbstractVector{T}; quiet::Bool = false) where {T <: AbstractFloat}
     # Compute the Chebyshev coefficients of the polynomial Q(x) = q(z)q(z⁻¹)/τ = |q(z)|²/τ (eqn. 1.10[2]),
-    # where z ∈ ∂D⁺, τ = q(i)q(-i), and q(z) = ∑ᵢ₌₀ⁿ bᵢzⁱ is "the normalized denominator of r̃∗(z) (eqn. 1.6a[2]) -
-    # the polynomial of degree <= n with constant term b₀ = 1 whose zeros are the finite poles of r̃∗(z) lying outside ∂D"[2].
-    # Returns the Chebyshev coefficients of Q(x) and the radius of the annulus ρ < |z| < ρ⁻¹ which contains no zeros.
+    # where z ∈ ∂D⁺, τ = q(i)q(-i), and q(z) = ∑ᵢ₌₀ⁿ ẽᵢzⁱ denotes "the normalized denominator of r̃∗(z) (eqn. 1.6a[2]) -
+    # the polynomial of degree <= n with constant term ẽ₀ = 1 whose zeros are the finite poles of r̃∗(z) lying outside ∂D"[2].
+    # Note: we work with the reciprocal polynomial q₁(z) = zⁿ⋅q(z⁻¹) = ∑ᵢ₌₀ⁿ bᵢzⁱ, which satisfies q(z)q(z⁻¹) = q₁(z)⋅q₁(z⁻¹)
+    # and has zeros inside ∂D. Returns Chebyshev coefficients of Q(x) and the radius ρ of the zero-free annulus ρ < |z| < ρ⁻¹.
     z = polyroots(b)
     ρ = maximum(abs, z)
 
     if ρ < 1
         # Normal case; roots are all within the unit disk. Compute Chebyshev coefficients of Q(x) by expanding the product directly:
-        #   Q̃(x) = q(z)q(z⁻¹) = (∑ᵢ₌₀ⁿ bᵢ zⁱ) (∑ⱼ₌₀ⁿ bⱼ z⁻ʲ) = ∑ᵢ,ⱼ₌₀ⁿ bᵢ bⱼ zⁱ⁻ʲ
+        #   Q̃(x) = q₁(z)q₁(z⁻¹) = (∑ᵢ₌₀ⁿ bᵢ zⁱ) (∑ⱼ₌₀ⁿ bⱼ z⁻ʲ) = ∑ᵢ,ⱼ₌₀ⁿ bᵢ bⱼ zⁱ⁻ʲ
         #        = ∑′ₖ₌₀ⁿ ∑ₗ₌ₖⁿ bₖ bₗ (zᵏ + z⁻ᵏ)    where ∑′ means k=0 term is halved
         #        = ∑′ₖ₌₀ⁿ (2 bₖ ∑ₗ₌ₖⁿ bₗ) Tₖ(x)     where Tₖ(x) = (zᵏ + z⁻ᵏ) / 2 for z ∈ ∂D⁺
         n = length(b) - 1
@@ -373,32 +391,105 @@ function rationalcf_normalized_denominator(b::AbstractVector{T}; quiet::Bool = f
                 q[l-k+1] += 2 * b[k] * b[l]
             end
         end
-        normalize_chebpoly!(q) # normalize by τ = q(i)q(-i) = Q̃(0)
+        normalize_chebpoly!(q) # normalize by τ = q₁(i)q₁(-i) = Q̃(0)
     else
         # Degenerate case; roots are not all within the unit disk. As in chebfun, we filter out roots with |z| > 1
-        # and then compute Q(x) using the renormalized q(z).
+        # and then compute Q(x) using the renormalized q₁(z).
         !quiet && @warn "Ill-conditioning detected. Results may be inaccurate"
         filter!(zi -> abs(zi) < 1, z)
         isempty(z) && return ones(T, 1), zero(T)
         ρ = maximum(abs, z)
         n = length(z)
 
-        # Form Q(x) using Chebyshev interpolation of q(z)q(z⁻¹)/τ; this is more numerically stable than expanding ∏ᵢ₌₁ⁿ (z - zᵢ)(z⁻¹ - zᵢ)
+        # Form Q(x) using Chebyshev interpolation of q₁(z)q₁(z⁻¹)/τ; this is more numerically stable than expanding ∏ᵢ₌₁ⁿ (z - zᵢ)(z⁻¹ - zᵢ)
         @. z = (z + inv(z)) / 2
         Π = prod(-, z)
-        Q = Fun(x -> real(prod(zi -> x - zi, z) / Π), ChebyshevInterval{T}(), n + 1)
+        Q = Fun(x -> real(prod(zi -> x - zi, z) / Π), ChebSpace(T), n + 1)
         q = coefficients(Q)
     end
 
     return q, ρ
 end
 
-function rationalcf_reduced(c::AbstractVector, m::Int, o::CFOptions)
-    p, q, _, s = polynomialcf(c, m, CFOptions(o, c))
-    return postprocess(c, p, q, s, o)
+function blaschke_laurent_coeffs(u::AbstractVector{T}, N::Int, M::Int) where {T <: AbstractFloat}
+    # Compute Laurent coefficients of the quotient of Blaschke products:
+    #   b(z) = z^M * P(z) / Q(z)
+    #        = z^M * (∑_{k=0}^{d-1} u_k z^k) / (∑_{k=0}^{d-1} u_{d-k-1} z^k).
+    # To efficiently evaluate b(z) for many z on the unit circle, u is padded u with
+    # zeros to length N and the numerator is computed using the FFT. Additionally,
+    # we save an FFT by using shift/reflect FFT identities to compute the denominator.
+    d = length(u)
+    û = rfft(zeropad(u, N))
+    θ = (2 * (M - d + 1) // N) * (T(0):T(N ÷ 2))
+    b̂ = @. cispi(-θ) * z_div_conj_z(û)
+    return irfft(b̂, N)
 end
 
-function postprocess(c::AbstractVector{T}, p::AbstractVector{T}, s::T, o::CFOptions{T}) where {T <: AbstractFloat}
+function incomplete_factorization_laurent_coeffs(u::AbstractVector{T}, du::AbstractVector{T}, N::Int) where {T <: AbstractFloat}
+    û = rfft(zeropad(u, N))
+    dû = rfft(zeropad(du, N))
+    return irfft(dû ./ û, N)
+end
+
+function eigs_hankel(c::AbstractVector{T}; nev = 1) where {T <: AbstractFloat}
+    # Declaring variable types helps inference since `eigs` is not type-stable,
+    # and `eigen` may not be type-stable for e.g. BigFloat
+    local D::Vector{T}, V::Matrix{T}
+    nc = length(c)
+    H = hankel(c)
+
+    if nc <= 32 || nev >= nc ÷ 2
+        D, V = eigen(Hermitian(Matrix(H))) # small problem, or need large fraction of eigenspace; convert Hankel to dense Matrix
+        I = partialsortperm(D, 1:nev; by = abs, rev = true)
+        D, V = D[I], V[:, I]
+    elseif T <: Union{Float32, Float64}
+        D, V = eigs(HermitianWrapper(H); nev, which = :LM, v0 = ones(T, nc) ./ nc, tol = nc * eps(T))
+        D, V = convert(Vector{T}, D), convert(Matrix{T}, V)
+    else
+        F, _ = partialschur(HermitianWrapper(H); nev, which = ArnoldiMethod.LM(), tol = nc * eps(T))
+        D, V = real(diag(F.R)), real(F.Q)
+    end
+
+    return D, V
+end
+
+function eigs_hankel_block(a::AbstractVector{T}, m, n; atol = 50 * eps(T)) where {T <: AbstractFloat}
+    # Each Hankel matrix corresponds to one diagonal m - n = const in the CF-table;
+    # when a diagonal intersects a square block, the eigenvalues on the
+    # intersection are all equal. k and l tell you how many entries on the
+    # intersection appear before and after the eigenvalues under consideration.
+    # u is the corresponding eigenvector
+    M = length(a) - 1
+
+    if m - n + 1 < -M
+        c = [zeros(T, -(m - n + 1) - M); a[(M+1).-abs.(-M:M)]]
+    else
+        c = a[(M+1).-abs.(m-n+1:M)]
+    end
+
+    nev = min(n + 10, length(c))
+    D, V = eigs_hankel(c; nev)
+
+    λ = D[n+1]
+    u = V[:, n+1]
+
+    k = 0
+    while k < n && abs(abs(D[n-k]) - abs(λ)) < atol
+        k += 1
+    end
+
+    l = 0
+    while n + l + 2 < nev && abs(abs(D[n+l+2]) - abs(λ)) < atol
+        l += 1
+    end
+
+    # Flag indicating if the function is actually rational
+    is_rat = n + l + 2 == nev
+
+    return λ, u, k, l, is_rat
+end
+
+function postprocess(p::AbstractVector{T}, λ::T, o::CFOptions{T}) where {T <: AbstractFloat}
     # Chop trailing zero coefficients to match parity
     p = paritychop(p, o.parity)
 
@@ -411,12 +502,12 @@ function postprocess(c::AbstractVector{T}, p::AbstractVector{T}, s::T, o::CFOpti
 
     # Rescale the outputs
     p .*= o.vscale
-    s *= o.vscale
+    λ *= o.vscale
 
-    return PolynomialApproximant(p, o.dom, s)
+    return PolynomialApproximant(p, o.dom, λ)
 end
 
-function postprocess(c::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T}, s::T, o::CFOptions{T}) where {T <: AbstractFloat}
+function postprocess(p::AbstractVector{T}, q::AbstractVector{T}, λ::T, o::CFOptions{T}) where {T <: AbstractFloat}
     # Chop trailing zero coefficients to match parity
     if o.parity === :even
         p, q = paritychop(p, :even), paritychop(q, :even)
@@ -438,9 +529,9 @@ function postprocess(c::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVect
 
     # Rescale the outputs
     p .*= o.vscale
-    s *= o.vscale
+    λ *= o.vscale
 
-    return RationalApproximant(p, q, o.dom, s)
+    return RationalApproximant(p, q, o.dom, λ)
 end
 
 #### Pade
@@ -512,14 +603,16 @@ MinimaxOptions(c::AbstractVector{T}, dom::Tuple; kwargs...) where {T <: Abstract
 MinimaxOptions(o::MinimaxOptions{T}, c::AbstractVector{T}) where {T <: AbstractFloat} = (@set! o.parity = parity(c); @set! o.vscale = vscale(c); return o)
 
 function minimax(fun::Fun, m::Int, n::Int; kwargs...)
-    p₀, q₀, _, _ = rationalcf(fun, m, n)
-    return minimax(fun, p₀, q₀; kwargs...)
+    cf_kwargs, mm_kwargs = splitkwargs(kwargs, CFOptionsFieldnames, MinimaxOptionsFieldnames)
+    p₀, q₀, _, _ = rationalcf(fun, m, n; cf_kwargs...)
+    return minimax(fun, p₀, q₀; mm_kwargs...)
 end
-minimax(f, m::Int, n::Int; kwargs...) = minimax(Fun(f), m, n; kwargs...)
-minimax(f, dom::Tuple, m::Int, n::Int; kwargs...) = minimax(Fun(f, Chebyshev(Interval(dom...))), m, n; kwargs...)
+minimax(f, m::Int, n::Int; kwargs...) = minimax(build_fun(f), m, n; kwargs...)
+minimax(f, dom::Tuple, m::Int, n::Int; kwargs...) = minimax(build_fun(f, dom), m, n; kwargs...)
 
-minimax(f, pq::AbstractVector...; kwargs...) = minimax(Fun(f), pq...; kwargs...)
-minimax(f, dom::Tuple, pq::AbstractVector...; kwargs...) = minimax(Fun(f, Chebyshev(Interval(dom...))), pq...; kwargs...)
+# Provide initial guesses `p` and `q` directly
+minimax(f, pq::AbstractVector...; kwargs...) = minimax(build_fun(f), pq...; kwargs...)
+minimax(f, dom::Tuple, pq::AbstractVector...; kwargs...) = minimax(build_fun(f, dom), pq...; kwargs...)
 minimax(fun::Fun, pq::AbstractVector...; kwargs...) = minimax(coefficients_and_endpoints(fun)..., pq...; kwargs...)
 minimax(f::AbstractVector{T}, pq::AbstractVector{T}...; kwargs...) where {T <: AbstractFloat} = minimax(f, (-one(T), one(T)), pq...; kwargs...)
 minimax(f::AbstractVector{T}, dom::Tuple, pq::AbstractVector{T}...; kwargs...) where {T <: AbstractFloat} = minimax(f, pq..., MinimaxOptions(f, dom; kwargs...))
@@ -537,8 +630,7 @@ struct PolynomialMinimaxWorkspace{T <: AbstractFloat}
 end
 function PolynomialMinimaxWorkspace(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T}) where {T <: AbstractFloat}
     m = length(p) - 1
-    nx = m + 2
-    (o.parity === :even || o.parity === :odd) && (nx += 1) # extra root expected for even/odd symmetry
+    nx = m + 2 + (o.parity === :even || o.parity === :odd) # extra root expected for even/odd symmetry
     f, p = Vector(f), Vector(p)
     f = f[1:min(end - 1, o.maxdegree)+1] # truncate to maxdegree
     Eₓ, Sₓ, δp_δε = ntuple(_ -> zeros(T, nx), 3)
@@ -547,22 +639,22 @@ function PolynomialMinimaxWorkspace(f::AbstractVector{T}, p::AbstractVector{T}, 
 end
 
 function minimax(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T}) where {T <: AbstractFloat}
-    (length(p) <= 1) && return minimax_constant_polynomial(f)
+    (length(p) <= 1) && return minimax_constant_polynomial(f, o)
     m = length(p) - 1
     workspace = PolynomialMinimaxWorkspace(f, p, o)
 
     iter = 0
     @views while true
         local (; f, δf, p, Eₓ, Sₓ, δp_δε, J, rhs, γ) = workspace
-        δF = Fun(Chebyshev(), δf)
+        δF = Fun(ChebSpace(T), δf)
         nx = length(rhs)
 
         # Update difference functional
         @. δf[1:m+1] = f[1:m+1] - p
-        iszero(δF) && return p, eps(T)
+        iszero(δF) && return postprocess(p, zero(T), o)
 
         # Compute new local extrema
-        x, δFₓ = extremal_nodes(δF)
+        x, δFₓ = minimax_nodes(δF)
         nx₀ = length(x)
         nx′ = min(nx₀, nx)
         @. Eₓ[1:nx′] = abs(δFₓ[1:nx′]) # error at each root
@@ -572,16 +664,17 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T
 
         if nx₀ != nx
             if iter == 0
-                (εmax <= 50 * eps(T) * max(vscale(f), one(T))) && return p, εmax # initial approximant is sufficiently accurate
+                (εmax <= 50 * eps(T) * max(vscale(f), one(T))) && return postprocess(p, εmax, o) # initial approximant is sufficiently accurate
                 !o.quiet && @warn "Initial polynomial approximant is not good enough to initialize minimax fine-tuning"
             end
             !o.quiet && @warn "Found $(nx₀) local extrema for degree $(m) $(o.parity) polynomial approximant, but expected $(nx)"
-            return p, T(NaN)
+            return postprocess(p, εmax, o)
         end
 
         if σε <= max(o.rtol * ε, o.atol)
             # Minimax variance sufficiently small
-            return check_signs(Sₓ; o.quiet) ? (p, ε) : (p, T(NaN))
+            check_signs(Sₓ; o.quiet)
+            return postprocess(p, ε, o)
         end
 
         # Newton iteration on the (linear) residual equation
@@ -597,12 +690,14 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T
 
         if abs(δε) <= max(o.rtol * ε, o.atol) || maximum(abs, δp) <= max(o.rtol * maximum(abs, p), o.atol)
             # Newton step is small enough, so we're done
-            return check_signs(Sₓ; o.quiet) ? (p, ε) : (p, T(NaN))
+            check_signs(Sₓ; o.quiet)
+            return postprocess(p, ε, o)
         end
 
         if (iter += 1) > o.maxiter
-            !o.quiet && @warn "Maximum number of iterations reached"
-            return check_signs(Sₓ; o.quiet) ? (p, ε) : (p, T(NaN))
+            !o.quiet && @warn "Maximum number of Newton iterations reached"
+            check_signs(Sₓ; o.quiet)
+            return postprocess(p, ε, o)
         end
     end
 end
@@ -622,8 +717,7 @@ struct RationalMinimaxWorkspace{T <: AbstractFloat}
 end
 function RationalMinimaxWorkspace(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T}, o::MinimaxOptions{T}) where {T <: AbstractFloat}
     m, n = length(p) - 1, length(q) - 1
-    nx = m + n + 2
-    (o.parity === :even || o.parity === :odd) && (nx += 1) # extra root expected for even/odd symmetry
+    nx = m + n + 2 + (o.parity === :even || o.parity === :odd) # extra root expected for even/odd symmetry
     f, p, q = Vector(f), Vector(p), Vector(q)
     f = f[1:min(end - 1, o.maxdegree)+1] # truncate to maxdegree
     normalize_chebrational!(p, q) # normalize such that Q(0) = 1
@@ -633,25 +727,26 @@ function RationalMinimaxWorkspace(f::AbstractVector{T}, p::AbstractVector{T}, q:
 end
 
 function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T}, o::MinimaxOptions{T}) where {T <: AbstractFloat}
-    (length(q) <= 1) && return minimax_reduced(f, p, o)
-    (length(p) <= 1 && o.parity === :odd) && return minimax_constant_rational(f)
+    (length(q) <= 1) && return minimax(f, p, o)
+    (length(p) <= 1 && o.parity === :odd) && return minimax_constant_polynomial(f, o)
     m, n = length(p) - 1, length(q) - 1
     workspace = RationalMinimaxWorkspace(f, p, q, o)
 
     iter = 0
     @views while true
         local (; f, p, q, Pₓ, Qₓ, Eₓ, Sₓ, δp_δq_δε, J, rhs, γ) = workspace
-        F = Fun(Chebyshev(), f)
-        P = Fun(Chebyshev(), p)
-        Q = Fun(Chebyshev(), q)
+        F = Fun(ChebSpace(T), f)
+        P = Fun(ChebSpace(T), p)
+        Q = Fun(ChebSpace(T), q)
         nx = length(rhs)
 
         # Update difference functional
-        δF = (F - P / Q)::typeof(F)
-        iszero(δF) && return p, q, eps(T)
+        R = Fun(x -> P(x) / Q(x), ChebSpace(T)) # Note: typically faster than P / Q since we know Q has no roots in [-1, 1] and thence we can avoid an `ApproxFun.roots` call
+        δF = F - R
+        iszero(δF) && return postprocess(p, q, zero(T), o)
 
         # Compute new local extrema
-        x, δFₓ = extremal_nodes(δF)
+        x, δFₓ = minimax_nodes(δF)
         nx₀ = length(x)
         nx′ = min(nx₀, nx)
         @. Qₓ[1:nx′] = Q(x[1:nx′])
@@ -663,16 +758,17 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T
 
         if nx₀ != nx
             if iter == 0
-                (εmax <= 50 * eps(T) * max(vscale(f), one(T))) && return p, q, εmax # approximant is sufficiently accurate
+                (εmax <= 50 * eps(T) * max(vscale(f), one(T))) && return postprocess(p, q, εmax, o) # approximant is sufficiently accurate
                 !o.quiet && @warn "Initial rational approximant is not good enough to initialize minimax fine-tuning"
             end
             !o.quiet && @warn "Found $(nx₀) local extrema for type $((m, n)) $(o.parity) rational approximant, but expected $(nx)"
-            return p, q, T(NaN)
+            return postprocess(p, q, εmax, o)
         end
 
         if σε <= max(o.rtol * ε, o.atol)
             # Minimax variance sufficiently small
-            return check_signs(Sₓ; o.quiet) ? (p, q, ε) : (p, q, T(NaN))
+            check_signs(Sₓ; o.quiet)
+            return postprocess(p, q, ε, o)
         end
 
         # Newton iteration on the residual equation
@@ -691,12 +787,14 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T
 
         if abs(δε) <= max(o.rtol * ε, o.atol) || maximum(abs, δp) <= max(o.rtol * maximum(abs, p), o.atol) || maximum(abs, δq) <= max(o.rtol * maximum(abs, q), o.atol)
             # Newton step is small enough, so we're done
-            return check_signs(Sₓ; o.quiet) ? (p, q, ε) : (p, q, T(NaN))
+            check_signs(Sₓ; o.quiet)
+            return postprocess(p, q, ε, o)
         end
 
         if (iter += 1) > o.maxiter
-            !o.quiet && @warn "Maximum number of iterations reached"
-            return check_signs(Sₓ; o.quiet) ? (p, q, ε) : (p, q, T(NaN))
+            !o.quiet && @warn "Maximum number of Newton iterations reached"
+            check_signs(Sₓ; o.quiet)
+            return postprocess(p, q, ε, o)
         end
     end
 end
@@ -758,43 +856,62 @@ end
     return J
 end
 
-function extremal_nodes(δF::Fun)
-    x₀, x₁ = endpoints(domain(δF))
-    δF₀, δF₁ = δF(x₀), δF(x₁)
-
+function minimax_nodes(δF::Fun)
     # Local extremal nodes
-    x = ApproxFun.roots(ApproxFun.differentiate(δF))
-    isempty(x) && return [x₀; x₁], [δF₀; δF₁]
-    sort!(x)
+    x, δfₓ, succ = local_minimax_nodes(δF)
+
+    # Check endpoints for extrema
+    x₀, x₁ = endpoints(domain(δF))
+    δf₀, δf₁ = δF(x₀), δF(x₁)
+    isempty(x) && return [x₀; x₁], [δf₀; δf₁], sign(δf₀) == -sign(δf₁)
 
     # An endpoint is an extremal node if it has a different sign than the nearest interior extremal node
-    δFₓ = δF.(x)
-    if sign(δF₀) != sign(δFₓ[1])
+    if sign(δf₀) == -sign(δfₓ[1])
         pushfirst!(x, x₀)
-        pushfirst!(δFₓ, δF₀)
+        pushfirst!(δfₓ, δf₀)
     end
-    if sign(δF₁) != sign(δFₓ[end])
+    if sign(δf₁) == -sign(δfₓ[end])
         push!(x, x₁)
-        push!(δFₓ, δF₁)
+        push!(δfₓ, δf₁)
     end
 
-    return x, δFₓ
+    return x, δfₓ, succ
 end
 
-function minimax_reduced(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T}) where {T <: AbstractFloat}
-    p, ε = minimax(f, p, o)
-    return p, ones(T, 1), T(ε)
+function local_minimax_nodes(δF::Fun)
+    ∇δF = ApproxFun.differentiate(δF)
+    ∇δf = coefficients(∇δF)
+    T = eltype(∇δf)
+
+    # Use at least 64-bit precision for initial node computation
+    x = convert(Vector{T}, chebroots(convert(Vector{Float64}, ∇δf)))
+    δfₓ = δF.(x)
+
+    if precision(T) > precision(Float64)
+        if check_signs(δfₓ; quiet = true)
+            # Found alternating sequence of errors; refine the initial nodes with higher precision
+            polish_chebroots!(∇δF, x)
+            !issorted(x) && sort!(x) # should always remain sorted, but just in case
+            δfₓ .= δF.(x)
+        else
+            # Computing nodes in lower precision failed to produce an alternating sequence of errors; try again in higher precision
+            x = chebroots(∇δf)
+            δfₓ = δF.(x)
+        end
+    end
+
+    succ = check_signs(δfₓ; quiet = true)
+    return x, δfₓ, succ
 end
 
-function minimax_constant_polynomial(f::AbstractVector{T}) where {T <: AbstractFloat}
-    lo, hi = extrema(Fun(Chebyshev(), f))
-    return [T(lo + hi) / 2], T(hi - lo) / 2
+function minimax_constant_polynomial(f::AbstractVector{T}, o::MinimaxOptions{T}) where {T <: AbstractFloat}
+    lo, hi = extrema(Fun(ChebSpace(T), f))
+    p, ε = [T(lo + hi) / 2], T(hi - lo) / 2
+    return PolynomialApproximant(p, o.dom, ε)
 end
 
-function minimax_constant_rational(f::AbstractVector{T}) where {T <: AbstractFloat}
-    p, ε = minimax_constant_polynomial(f)
-    return p, ones(T, 1), T(ε)
-end
+postprocess(p::AbstractVector{T}, ε::T, o::MinimaxOptions{T}) where {T <: AbstractFloat} = PolynomialApproximant(p, o.dom, ε)
+postprocess(p::AbstractVector{T}, q::AbstractVector{T}, ε::T, o::MinimaxOptions{T}) where {T <: AbstractFloat} = RationalApproximant(p, q, o.dom, ε)
 
 function check_signs(S; quiet = false)
     pass = all(S[i] == -S[i+1] for i in 1:length(S)-1)
@@ -804,25 +921,9 @@ end
 
 #### Linear algebra utilities
 
-function blaschke_laurent_coeffs(u::AbstractVector{T}, N::Int, M::Int) where {T <: AbstractFloat}
-    # Compute Laurent coefficients of the quotient of Blaschke products:
-    #   b(z) = z^M * P(z) / Q(z)
-    #        = z^M * (∑_{k=0}^{d-1} u_k z^k) / (∑_{k=0}^{d-1} u_{d-k-1} z^k).
-    # To efficiently evaluate b(z) for many z on the unit circle, u is padded u with
-    # zeros to length N and the numerator is computed using the FFT. Additionally,
-    # we save an FFT by using shift/reflect FFT identities to compute the denominator.
-    d = length(u)
-    û = rfft(zeropad(u, N))
-    θ = (2 * (M - d + 1) // N) * (T(0):T(N ÷ 2))
-    b̂ = @. cispi(-θ) * z_div_conj_z(û)
-    return irfft(b̂, N)
-end
-
-function incomplete_poly_fact_laurent_coeffs(u::AbstractVector{T}, du::AbstractVector{T}, N::Int) where {T <: AbstractFloat}
-    û = rfft(zeropad(u, N))
-    dû = rfft(zeropad(du, N))
-    return irfft(dû ./ û, N)
-end
+hankel(c::AbstractVector) = Hankel(zeropad(c, 2 * length(c) - 1))
+hankel(c::AbstractVector, r::AbstractVector) = Hankel(c, r)
+toeplitz(c::AbstractVector) = Toeplitz(c, c)
 
 @inline function z_div_conj_z(z::Complex)
     # Efficiently, safely, and accurately compute z / conj(z). Returns 1 if z == 0.
@@ -843,10 +944,6 @@ function conv(a::AbstractVector, b::AbstractVector, L::Int = length(a) + length(
     return c
 end
 
-hankel(c::AbstractVector) = Hankel(zeropad(c, 2 * length(c) - 1))
-hankel(c::AbstractVector, r::AbstractVector) = Hankel(c, r)
-toeplitz(c::AbstractVector) = Toeplitz(c, c)
-
 # Dummy wrapper to ensure we don't hit generic fallbacks
 struct HermitianWrapper{T <: AbstractFloat, A <: AbstractMatrix{T}} <: AbstractMatrix{T}
     A::A
@@ -860,73 +957,25 @@ LinearAlgebra.transpose(H::HermitianWrapper) = H
 LinearAlgebra.adjoint(H::HermitianWrapper) = H
 LinearAlgebra.mul!(y::AbstractVector, H::HermitianWrapper, x::AbstractVector, α::Number, β::Number) = mul!(y, H.A, x, α, β)
 
-function eigs_hankel(c::AbstractVector{T}; nev = 1) where {T <: AbstractFloat}
-    # Declaring variable types helps inference since `eigs` is not type-stable,
-    # and `eigen` may not be type-stable for e.g. BigFloat
-    local D::Vector{T}, V::Matrix{T}
-    nc = length(c)
-    H = hankel(c)
-
-    if nc <= 32 || nev >= nc ÷ 2
-        D, V = eigen(Hermitian(Matrix(H))) # small problem, or need large fraction of eigenspace; convert Hankel to dense Matrix
-        I = partialsortperm(D, 1:nev; by = abs, rev = true)
-        D, V = D[I], V[:, I]
-    elseif T <: Union{Float32, Float64}
-        D, V = eigs(HermitianWrapper(H); nev, which = :LM, v0 = ones(T, nc) ./ nc, tol = nc * eps(T))
-        D, V = convert(Vector{T}, D), convert(Matrix{T}, V)
-    else
-        F, _ = partialschur(HermitianWrapper(H); nev, which = ArnoldiMethod.LM(), tol = nc * eps(T))
-        D, V = real(diag(F.R)), real(F.Q)
-    end
-
-    return D, V
-end
-
-function eigs_hankel_block(a::AbstractVector{T}, m, n; atol = 50 * eps(T)) where {T <: AbstractFloat}
-    # Each Hankel matrix corresponds to one diagonal m - n = const in the CF-table;
-    # when a diagonal intersects a square block, the eigenvalues on the
-    # intersection are all equal. k and l tell you how many entries on the
-    # intersection appear before and after the eigenvalues under consideration.
-    # u is the corresponding eigenvector
-    M = length(a) - 1
-
-    if m - n + 1 < -M
-        c = [zeros(T, -(m - n + 1) - M); a[(M+1).-abs.(-M:M)]]
-    else
-        c = a[(M+1).-abs.(m-n+1:M)]
-    end
-
-    nev = min(n + 10, length(c))
-    D, V = eigs_hankel(c; nev)
-
-    s = D[n+1]
-    u = V[:, n+1]
-
-    δ⁻ = 0
-    while δ⁻ < n && abs(abs(D[n-δ⁻]) - abs(s)) < atol
-        δ⁻ += 1
-    end
-
-    δ⁺ = 0
-    while n + δ⁺ + 2 < nev && abs(abs(D[n+δ⁺+2]) - abs(s)) < atol
-        δ⁺ += 1
-    end
-
-    # Flag indicating if the function is actually rational
-    is_rat = n + δ⁺ + 2 == nev
-
-    return s, u, δ⁻, δ⁺, is_rat
-end
-
 #### Helper functions
+
+ChebSpace(::Type{T}) where {T <: AbstractFloat} = Chebyshev(ChebyshevInterval{T}())
+ChebSpace(::Type{T}, dom::Tuple) where {T <: AbstractFloat} = Chebyshev(ClosedInterval{T}(dom...))
+
+build_fun(f) = build_fun(Float64, f)
+build_fun(f, dom::Tuple) = build_fun(promote_type(map(typeof ∘ float, dom)...), f, dom)
+build_fun(::Type{T}, f) where {T <: AbstractFloat} = build_fun(T, f, (-one(T), one(T)))
+build_fun(::Type{T}, f, dom::Tuple) where {T <: AbstractFloat} = Fun(f, ChebSpace(T, dom))
+build_fun(::Type{T}, f::AbstractVector{T}, dom::Tuple) where {T <: AbstractFloat} = Fun(ChebSpace(T, dom), f)
 
 function check_endpoints(dom::Tuple)
     @assert length(dom) == 2 "Domain must be a tuple of length 2"
     @assert dom[1] < dom[2] "Domain must be increasing"
     @assert all(isfinite, dom) "Domain must be finite"
-    return promote(float.(dom)...)
+    return promote(map(float, dom)...)
 end
 check_endpoints(dom::Union{Interval, ChebyshevInterval}) = check_endpoints(endpoints(dom))
+check_endpoints(dom::Chebyshev) = check_endpoints(domain(dom))
 check_endpoints(fun::Fun) = check_endpoints(domain(fun))
 
 function check_fun(fun::Fun)
@@ -958,6 +1007,15 @@ zeropad(x::AbstractVector, n::Int) = zeropad!(x[1:min(end, n)], n)
 
 zeropadresize!(x::AbstractVector, n::Int) = resize!(zeropad!(x, n), n)
 zeropadresize(x::AbstractVector, n::Int) = zeropadresize!(x[1:min(end, n)], n)
+
+function splitkwargs(kwargs, set1, set2)
+    kws1 = intersect(keys(kwargs), set1) # keyword arguments in set1
+    kws2 = setdiff(keys(kwargs), setdiff(set1, set2)) # filter out keyword arguments exclusive to set2
+    return kwargs[kws1], kwargs[kws2]
+end
+
+evalrat(x, p, q) = evalpoly(x, p) / evalpoly(x, q)
+evalrat(x, p) = evalpoly(x, p)
 
 #### Polynomial utilities
 
@@ -1047,5 +1105,112 @@ paritychop(c::AbstractVector, parity::Symbol) = convert(Vector, lazyparitychop(c
 # Crude bound on infinity norm of `fun`
 vscale(fun::Fun) = vscale(coefficients(fun))
 vscale(c::AbstractVector{T}) where {T <: AbstractFloat} = sum(abs, c; init = zero(T))
+
+function chebroots(c::AbstractVector{T}; htol = 100 * eps(T)) where {T <: AbstractFloat}
+    scale = vscale(c)
+    scale == zero(T) && return T[] # zero function
+    c = ApproxFun.chop(c, zero(T)) # prune exact zeros
+    c ./= scale
+
+    # Recursively compute roots on subintervals
+    r = recurse_chebroots(c, htol)
+
+    # Check endpoints, which are prone to inaccuracy
+    f⁻, f⁺ = chebeval_endpoints(c)
+    (isempty(r) || !isapprox(last(r), one(T); atol = htol)) && (abs(f⁺) < htol) && push!(r, one(T))
+    (isempty(r) || !isapprox(first(r), -one(T); atol = htol)) && (abs(f⁻) < htol) && pushfirst!(r, -one(T))
+
+    return r
+end
+chebroots(f::Fun; kwargs...) = chebroots(coefficients(f); kwargs...)
+
+function chebeval_endpoints(c::AbstractVector{T}) where {T <: AbstractFloat}
+    f⁻ = f⁺ = zero(T)
+    for i in length(c):-1:1
+        cᵢ = c[i]
+        f⁻ += ifelse(iseven(i), -cᵢ, cᵢ) # f(-1)
+        f⁺ += cᵢ # f(+1)
+    end
+    return f⁻, f⁺
+end
+
+function prune_chebroots(r, htol::T) where {T <: Real}
+    r = real(r[abs.(imag.(r)).<htol]) # Remove dangling imaginary parts:
+    r = sort!(r[abs.(r).<=1+htol]) # Keep roots inside [-1 1]:
+    r .= clamp.(r, -one(T), one(T)) # Put roots near ends onto the domain:
+    return r
+end
+
+function polish_chebroots!(fun::Fun, ∇fun::Fun, x::AbstractVector{T}) where {T <: AbstractFloat}
+    # Polish roots using Newton's method
+    isempty(x) && return x
+    Δx = zero(x)
+    Δxmax = T(Inf)
+    maxiter = ceil(Int, log2(-log2(eps(T)))) # relative error should be ~eps(Float64) to start, and Newton's method squares the error each iteration
+    for i in 1:maxiter
+        Δx .= extrapolate.((fun,), x) ./ extrapolate.((∇fun,), x) # note: Δx is invariant to the scale of fun
+        x .-= Δx
+        Δxmax, Δxmax_prev = maximum(abs, Δx), Δxmax
+        (Δxmax <= 5 * eps(T) || (Δxmax < √eps(T) && Δxmax > Δxmax_prev / 2)) && break
+    end
+    return x
+end
+polish_chebroots!(fun::Fun, x::AbstractVector{T}) where {T <: AbstractFloat} = polish_chebroots!(fun, ApproxFun.differentiate(fun), x)
+
+function colleague_matrix(c::AbstractVector{T}) where {T <: Number}
+    # Form the colleague matrix from the Chebyshev coefficients `c`
+    n = length(c) - 1
+    A = zeros(T, n, n)
+
+    for k in 1:n-1
+        A[k+1, k] = T(0.5)
+        A[k, k+1] = T(0.5)
+    end
+    for k in 1:n
+        A[1, end-k+1] -= T(0.5) * c[k] / c[end]
+    end
+    A[n, n-1] = one(T)
+
+    return A
+end
+
+function recurse_chebroots(c::AbstractVector{T}, htol::T) where {T <: AbstractFloat}
+    # Compute the real roots contained in [-1, 1] of a polynomial in the Chebyshev basis
+    c = ApproxFun.chop(c, eps(T) * vscale(c))
+    n = length(c)
+
+    if n == 0
+        # Zero function
+        return T[]
+
+    elseif n == 1
+        # Constant function
+        return c[1] == zero(T) ? zeros(T, 1) : T[]
+
+    elseif n == 2
+        # Linear function
+        r = -c[1] / c[2]
+        return abs(imag(r)) > htol || abs(real(r) > 1 + htol) ? T[] : T[clamp(real(r), -one(T), one(T))]
+
+    elseif n <= 70
+        # Polynomial degree is small enough; compute roots directly using the colleague matrix
+        r = prune_chebroots(eigvals(colleague_matrix(c)), htol)
+        return clamp.(r, -one(T), one(T))
+
+    else
+        # Recursively subdivide the interval [-1,1] into [-1, x₀], [x₀, 1]
+        x₀ = T(-0.004849834917525)
+        a⁻, b⁻ = (x₀ + 1) / 2, (x₀ - 1) / 2
+        a⁺, b⁺ = (1 - x₀) / 2, (x₀ + 1) / 2
+        f = Fun(ChebSpace(T), c)
+        f1 = Fun(x -> f(muladd(a⁻, x, b⁻)), ChebSpace(T))
+        f2 = Fun(x -> f(muladd(a⁺, x, b⁺)), ChebSpace(T))
+
+        # Recurse and map roots back to original interval
+        r1 = muladd.(a⁻, recurse_chebroots(coefficients(f1), htol), b⁻)
+        r2 = muladd.(a⁺, recurse_chebroots(coefficients(f2), htol), b⁺)
+        return [r1; r2]
+    end
+end
 
 end # module CaratheodoryFejerApprox

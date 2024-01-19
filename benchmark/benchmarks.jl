@@ -15,8 +15,8 @@ function do_bench(fun::Fun, dmax = 12)
     out = 0.0
     for d in dmax:-1:0, m in d:-1:0
         n = d - m
-        p, q, s = rationalcf(fun, m, n)
-        out += Float64(abs(s)) # ensure loop body not optimized away
+        p, q, λ = rationalcf(fun, m, n)
+        out += Float64(λ) # ensure loop body not optimized away
     end
     return out
 end
