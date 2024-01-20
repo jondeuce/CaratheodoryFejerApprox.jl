@@ -24,11 +24,6 @@ end
     @test λ ≈ 1.538052539804450e-10
 end
 
-gaussian(x) = exp(-x^2)
-skewed_gaussian(x) = x * exp(-x^2)
-sinc10(x) = sinc(10x)
-runge(x) = 1 / (1 + 25x^2)
-
 @testset "polynomialcf: $f" for (f, fstr, fparity) in [
     (exp, "@(x) exp(x)", :generic),
     (gaussian, "@(x) exp(-x.^2)", :even),
@@ -38,18 +33,19 @@ runge(x) = 1 / (1 + 25x^2)
 ]
     @testset "m=$m, dom=$dom" for m in 0:8, dom in [(-1.0, 1.0), (-0.97, 1.32)]
         parity = dom[1] == -dom[2] ? fparity : :generic
+
+        F = ChebFun(f, dom)
         p, _, λ = chebfuncf(fstr, dom, m, 0; parity)
-        p′, _, _, λ′ = polynomialcf(f, dom, m; parity, vscale = 1.0)
+        p′, _, _, λ′ = polynomialcf(F, m; parity, vscale = 1.0)
 
         # Polynomial CF is stable; coefficients should match to high precision
         @test compare_chebcoeffs(p, p′; atol = 1e-14, rtol = 1e-14, parity)
         @test isapprox(λ, λ′; atol = 1e-14, rtol = 1e-14)
 
         # Compare the approximants to eachother and to the original function
-        P, P′ = build_fun(dom).((p, p′))
-        xs = rand_uniform(dom, 256)
-        @test all(isapprox(P(x), P′(x); atol = 1e-14) for x in xs)
-        @test all(isapprox(f(x), P′(x); atol = 1.5 * λ′) for x in xs)
+        P, P′ = ChebFun.((p, p′), (dom,))
+        @test chebinfnorm(P - P′) <= 1e-14
+        @test chebinfnorm(F - P′) <= 1.5 * λ′
     end
 end
 
@@ -62,8 +58,10 @@ end
         parity = dom[1] == -dom[2] ? fparity : :generic
         p_parity = parity === :even ? :even : parity === :odd ? :odd : :generic
         q_parity = (parity === :even || parity === :odd) ? :even : :generic
+
+        F = ChebFun(f, dom)
         p, q, λ = chebfuncf(fstr, dom, m, n; parity)
-        p′, q′, _, λ′ = rationalcf(f, dom, m, n; parity, vscale = 1.0)
+        p′, q′, _, λ′ = rationalcf(F, m, n; parity, vscale = 1.0)
 
         p, q = normalize_rational(p, q)
         p′, q′ = normalize_rational(p′, q′)
@@ -75,16 +73,16 @@ end
             # Rational approximant computation is less numerically stable, so error tolerances are more lenient for coefficients
             @test compare_chebcoeffs(p, p′; atol = 1e-8, rtol = 1e-4, parity = p_parity)
             @test compare_chebcoeffs(q, q′; atol = 1e-8, rtol = 1e-4, parity = q_parity)
-            @test isapprox(λ, λ′; atol = 1e-14, rtol = 1e-14)
         end
+        @test isapprox(λ, λ′; atol = 1e-14, rtol = 1e-14)
 
-        P, Q, P′, Q′ = build_fun(dom).((p, q, p′, q′))
-        R = x -> P(x) / Q(x)
-        R′ = x -> P′(x) / Q′(x)
+        P, Q, P′, Q′ = ChebFun.((p, q, p′, q′), (dom,))
+        R = ChebFun(x -> P(x) / Q(x), dom)
+        R′ = ChebFun(x -> P′(x) / Q′(x), dom)
 
         # Compare the approximants to eachother and to the original function
-        xs = rand_uniform(dom, 256)
-        @test maximum(abs, R.(xs) .- R′.(xs)) <= max(1e-8, 1e-4 * maximum(abs, R.(xs)))
-        @test maximum(abs, f.(xs) .- R′.(xs)) <= max(2 * λ′, 1e-14)
+        errbound = (m == 0 ? 5.0 : 1.5) * λ′ # error estimate seems to underestimate when m = 0
+        @test chebinfnorm(R - R′) <= max(1e-8, 1e-4 * chebinfnorm(R))
+        @test chebinfnorm(F - R′) <= max(errbound, 1e-14)
     end
 end

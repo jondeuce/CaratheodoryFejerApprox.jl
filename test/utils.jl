@@ -1,21 +1,18 @@
 using CaratheodoryFejerApprox
 
 using ApproxFun: Chebyshev, Fun, Interval
-using CaratheodoryFejerApprox: check_endpoints, lazychopcoeffs, parity, normalize_rational
+using CaratheodoryFejerApprox: ChebFun, chebeval_endpoints, chebrange, chebroots, chebinfnorm, lazychopcoeffs, parity, normalize_rational
 using Statistics: mean
+
+runge(x) = 1 / (1 + 25x^2)
+gaussian(x) = exp(-x^2)
+skewed_gaussian(x) = x * exp(-x^2)
+sinc10(x) = sinc(10x)
+const TEST_FUNS = [exp, runge, gaussian, skewed_gaussian, sinc10]
 
 rand_uniform(a::T, b::T) where {T} = a + (b - a) * rand(T)
 rand_uniform(a::T, b::T, n::Int) where {T} = a .+ (b - a) .* rand(T, n)
 rand_uniform(dom::Tuple = (-1, 1), args...) = rand_uniform(float.(dom)..., args...)
-
-cheb_interval(dom) = cheb_interval(check_endpoints(dom))
-cheb_interval(dom::NTuple{2, T}) where {T <: AbstractFloat} = cheb_interval(T, check_endpoints(dom))
-cheb_interval(::Type{T}, dom) where {T} = Chebyshev(Interval(float(T).(check_endpoints(dom))...))
-
-build_fun(f::Base.Callable, dom::Tuple = (-1, 1)) = Fun(f, cheb_interval(dom))
-build_fun(a::AbstractArray, dom::Tuple = (-1, 1)) = Fun(cheb_interval(float(eltype(a)), dom), float(a))
-build_fun((p, q)::NTuple{2, <:AbstractArray}, dom::Tuple = (-1, 1)) = build_fun.(normalize_rational(p, q), (dom,))
-build_fun(dom::Tuple = (-1, 1)) = a -> build_fun(a, dom)
 
 function compare_chebcoeffs(a1::AbstractVector{T}, a2::AbstractVector{T}; atol, rtol, parity = :generic) where {T <: AbstractFloat}
     # Compare Chebyshev coefficients of two polynomials
@@ -47,5 +44,5 @@ end
 function rand_chebfun(dom::NTuple{2, T} = (-1.0, 1.0); kwargs...) where {T <: AbstractFloat}
     # Chebfun with random exponentially decaying coefficients such that |c[n]| ~ eps(T)
     c = rand_chebcoeffs(T; kwargs...)
-    return build_fun(c, dom)
+    return ChebFun(c, dom)
 end

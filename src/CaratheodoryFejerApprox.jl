@@ -65,11 +65,11 @@ end
 PolynomialApproximant(p::AbstractVector{T}, dom::NTuple{2, T}, err::T) where {T <: AbstractFloat} = RationalApproximant(p, ones(T, 1), dom, err)
 
 function (res::RationalApproximant{T})(x) where {T <: AbstractFloat}
-    pₓ = build_fun(T, res.p, res.dom)(T(x))
+    pₓ = ChebFun(T, res.p, res.dom)(T(x))
     if length(res.q) <= 1
         return pₓ
     else
-        qₓ = build_fun(T, res.q, res.dom)(T(x))
+        qₓ = ChebFun(T, res.q, res.dom)(T(x))
         return pₓ / qₓ
     end
 end
@@ -138,14 +138,14 @@ const CFOptionsFieldnames = Symbol[fieldnames(CFOptions)...]
 CFOptions(c::AbstractVector{T}, dom::Tuple; kwargs...) where {T <: AbstractFloat} = CFOptions{T}(; dom = check_endpoints(T.(dom)), parity = parity(c), vscale = vscale(c), kwargs...)
 CFOptions(o::CFOptions{T}, c::AbstractVector{T}) where {T <: AbstractFloat} = (@set! o.parity = parity(c); @set! o.vscale = vscale(c); return o)
 
-polynomialcf(f, m::Int; kwargs...) = polynomialcf(build_fun(f), m; kwargs...)
-polynomialcf(f, dom::Tuple, m::Int; kwargs...) = polynomialcf(build_fun(f, dom), m; kwargs...)
+polynomialcf(f, m::Int; kwargs...) = polynomialcf(ChebFun(f), m; kwargs...)
+polynomialcf(f, dom::Tuple, m::Int; kwargs...) = polynomialcf(ChebFun(f, dom), m; kwargs...)
 polynomialcf(fun::Fun, m::Int; kwargs...) = polynomialcf(coefficients_and_endpoints(fun)..., m; kwargs...)
 polynomialcf(c::AbstractVector{T}, m::Int; kwargs...) where {T <: AbstractFloat} = polynomialcf(c, (-one(T), one(T)), m; kwargs...)
 polynomialcf(c::AbstractVector{T}, dom::Tuple, m::Int; kwargs...) where {T <: AbstractFloat} = polynomialcf(c, m, CFOptions(c, dom; kwargs...))
 
-rationalcf(f, m::Int, n::Int; kwargs...) = rationalcf(build_fun(f), m, n; kwargs...)
-rationalcf(f, dom::Tuple, m::Int, n::Int; kwargs...) = rationalcf(build_fun(f, dom), m, n; kwargs...)
+rationalcf(f, m::Int, n::Int; kwargs...) = rationalcf(ChebFun(f), m, n; kwargs...)
+rationalcf(f, dom::Tuple, m::Int, n::Int; kwargs...) = rationalcf(ChebFun(f, dom), m, n; kwargs...)
 rationalcf(fun::Fun, m::Int, n::Int; kwargs...) = rationalcf(coefficients_and_endpoints(fun)..., m, n; kwargs...)
 rationalcf(c::AbstractVector{T}, m::Int, n::Int; kwargs...) where {T <: AbstractFloat} = rationalcf(c, (-one(T), one(T)), m, n; kwargs...)
 rationalcf(c::AbstractVector{T}, dom::Tuple, m::Int, n::Int; kwargs...) where {T <: AbstractFloat} = rationalcf(c, m, n, CFOptions(c, dom; kwargs...))
@@ -607,12 +607,12 @@ function minimax(fun::Fun, m::Int, n::Int; kwargs...)
     p₀, q₀, _, _ = rationalcf(fun, m, n; cf_kwargs...)
     return minimax(fun, p₀, q₀; mm_kwargs...)
 end
-minimax(f, m::Int, n::Int; kwargs...) = minimax(build_fun(f), m, n; kwargs...)
-minimax(f, dom::Tuple, m::Int, n::Int; kwargs...) = minimax(build_fun(f, dom), m, n; kwargs...)
+minimax(f, m::Int, n::Int; kwargs...) = minimax(ChebFun(f), m, n; kwargs...)
+minimax(f, dom::Tuple, m::Int, n::Int; kwargs...) = minimax(ChebFun(f, dom), m, n; kwargs...)
 
 # Provide initial guesses `p` and `q` directly
-minimax(f, pq::AbstractVector...; kwargs...) = minimax(build_fun(f), pq...; kwargs...)
-minimax(f, dom::Tuple, pq::AbstractVector...; kwargs...) = minimax(build_fun(f, dom), pq...; kwargs...)
+minimax(f, pq::AbstractVector...; kwargs...) = minimax(ChebFun(f), pq...; kwargs...)
+minimax(f, dom::Tuple, pq::AbstractVector...; kwargs...) = minimax(ChebFun(f, dom), pq...; kwargs...)
 minimax(fun::Fun, pq::AbstractVector...; kwargs...) = minimax(coefficients_and_endpoints(fun)..., pq...; kwargs...)
 minimax(f::AbstractVector{T}, pq::AbstractVector{T}...; kwargs...) where {T <: AbstractFloat} = minimax(f, (-one(T), one(T)), pq...; kwargs...)
 minimax(f::AbstractVector{T}, dom::Tuple, pq::AbstractVector{T}...; kwargs...) where {T <: AbstractFloat} = minimax(f, pq..., MinimaxOptions(f, dom; kwargs...))
@@ -890,7 +890,7 @@ function local_minimax_nodes(δF::Fun)
     if precision(T) > precision(Float64)
         if check_signs(δfₓ; quiet = true)
             # Found alternating sequence of errors; refine the initial nodes with higher precision
-            polish_chebroots!(∇δF, x)
+            refine_chebroots!(∇δF, x)
             !issorted(x) && sort!(x) # should always remain sorted, but just in case
             δfₓ .= δF.(x)
         else
@@ -962,11 +962,13 @@ LinearAlgebra.mul!(y::AbstractVector, H::HermitianWrapper, x::AbstractVector, α
 ChebSpace(::Type{T}) where {T <: AbstractFloat} = Chebyshev(ChebyshevInterval{T}())
 ChebSpace(::Type{T}, dom::Tuple) where {T <: AbstractFloat} = Chebyshev(ClosedInterval{T}(dom...))
 
-build_fun(f) = build_fun(Float64, f)
-build_fun(f, dom::Tuple) = build_fun(promote_type(map(typeof ∘ float, dom)...), f, dom)
-build_fun(::Type{T}, f) where {T <: AbstractFloat} = build_fun(T, f, (-one(T), one(T)))
-build_fun(::Type{T}, f, dom::Tuple) where {T <: AbstractFloat} = Fun(f, ChebSpace(T, dom))
-build_fun(::Type{T}, f::AbstractVector{T}, dom::Tuple) where {T <: AbstractFloat} = Fun(ChebSpace(T, dom), f)
+ChebFun(f) = ChebFun(Float64, f)
+ChebFun(f::AbstractVector) = ChebFun(float(eltype(f)), f)
+ChebFun(f, dom::Tuple) = ChebFun(promote_type(map(typeof ∘ float, dom)...), f, dom)
+ChebFun(f::AbstractVector, dom::Tuple) = ChebFun(float(eltype(f)), f, dom)
+ChebFun(::Type{T}, f) where {T <: AbstractFloat} = ChebFun(T, f, (-one(T), one(T)))
+ChebFun(::Type{T}, f, dom::Tuple) where {T <: AbstractFloat} = Fun(f, ChebSpace(T, dom))
+ChebFun(::Type{T}, f::AbstractVector, dom::Tuple) where {T <: AbstractFloat} = Fun(ChebSpace(T, dom), convert(Vector{T}, f))
 
 function check_endpoints(dom::Tuple)
     @assert length(dom) == 2 "Domain must be a tuple of length 2"
@@ -1106,6 +1108,17 @@ paritychop(c::AbstractVector, parity::Symbol) = convert(Vector, lazyparitychop(c
 vscale(fun::Fun) = vscale(coefficients(fun))
 vscale(c::AbstractVector{T}) where {T <: AbstractFloat} = sum(abs, c; init = zero(T))
 
+function chebrange(fun::Fun)
+    # Compute the infinity norm of a Fun
+    fun = ChebFun(coefficients(fun)) # transfer to [-1, 1]
+    fa, fb = minmax(chebeval_endpoints(fun)...)
+    x = chebroots(ApproxFun.differentiate(fun))
+    isempty(x) && return fa, fb
+    flo, fhi = extrema(fun, x)
+    return min(fa, flo), max(fb, fhi)
+end
+chebinfnorm(fun::Fun) = max(abs.(chebrange(fun))...)
+
 function chebroots(c::AbstractVector{T}; htol = 100 * eps(T)) where {T <: AbstractFloat}
     scale = vscale(c)
     scale == zero(T) && return T[] # zero function
@@ -1133,16 +1146,15 @@ function chebeval_endpoints(c::AbstractVector{T}) where {T <: AbstractFloat}
     end
     return f⁻, f⁺
 end
+chebeval_endpoints(f::Fun) = chebeval_endpoints(coefficients(f))
 
-function prune_chebroots(r, htol::T) where {T <: Real}
-    r = real(r[abs.(imag.(r)).<htol]) # Remove dangling imaginary parts:
-    r = sort!(r[abs.(r).<=1+htol]) # Keep roots inside [-1 1]:
-    r .= clamp.(r, -one(T), one(T)) # Put roots near ends onto the domain:
-    return r
+function prune_chebroots!(r::AbstractVector{C}, htol::T) where {T <: AbstractFloat, C <: Union{T, Complex{T}}}
+    r = filter!(z -> abs(imag(z)) < htol && abs(real(z)) <= 1 + htol, r) # keep roots that lie in [-1 - htol, 1 + htol] x [-htol, htol]
+    return clamp.(real.(r), -one(T), one(T)) # return real part clamped to [-1, 1]
 end
 
-function polish_chebroots!(fun::Fun, ∇fun::Fun, x::AbstractVector{T}) where {T <: AbstractFloat}
-    # Polish roots using Newton's method
+function refine_chebroots!(fun::Fun, ∇fun::Fun, x::AbstractVector{T}) where {T <: AbstractFloat}
+    # Refine roots using Newton's method
     isempty(x) && return x
     Δx = zero(x)
     Δxmax = T(Inf)
@@ -1155,7 +1167,7 @@ function polish_chebroots!(fun::Fun, ∇fun::Fun, x::AbstractVector{T}) where {T
     end
     return x
 end
-polish_chebroots!(fun::Fun, x::AbstractVector{T}) where {T <: AbstractFloat} = polish_chebroots!(fun, ApproxFun.differentiate(fun), x)
+refine_chebroots!(fun::Fun, x::AbstractVector{T}) where {T <: AbstractFloat} = refine_chebroots!(fun, ApproxFun.differentiate(fun), x)
 
 function colleague_matrix(c::AbstractVector{T}) where {T <: Number}
     # Form the colleague matrix from the Chebyshev coefficients `c`
@@ -1194,7 +1206,7 @@ function recurse_chebroots(c::AbstractVector{T}, htol::T) where {T <: AbstractFl
 
     elseif n <= 70
         # Polynomial degree is small enough; compute roots directly using the colleague matrix
-        r = prune_chebroots(eigvals(colleague_matrix(c)), htol)
+        r = prune_chebroots!(eigvals(colleague_matrix(c)), htol)
         return clamp.(r, -one(T), one(T))
 
     else

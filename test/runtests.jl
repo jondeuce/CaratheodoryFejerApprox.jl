@@ -5,8 +5,12 @@ using Test
 include("utils.jl")
 
 @testset "CaratheodoryFejerApprox.jl" begin
+    @testset "Julia Tests" verbose = true begin
+        include("julia_tests.jl")
+    end
+
     if get(ENV, "CI", "false") == "false"
-        @testset "Chebfun" verbose = true begin
+        @testset "Matlab Tests" verbose = true begin
             # Only run Chebfun tests if testing locally
             include("chebfun.jl")
         end
