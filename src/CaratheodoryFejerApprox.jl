@@ -50,9 +50,11 @@ using GenericFFT: GenericFFT # defines generic methods for FFTs
 using GenericLinearAlgebra: GenericLinearAlgebra # defines generic method for `LinearAlgebra.eigen` and `Polynomials.roots`
 using LinearAlgebra: LinearAlgebra, Hermitian, cholesky!, cond, diag, dot, eigen, eigvals, ldiv!, mul!, qr!
 using Polynomials: Polynomials, ChebyshevT, Polynomial
+using PrecompileTools: PrecompileTools, @compile_workload
 using Setfield: Setfield, @set!
 using ToeplitzMatrices: ToeplitzMatrices, Toeplitz, Hankel
 
+export Double64 # re-export
 export minimax, polynomialcf, rationalcf
 export chebcoeffs, monocoeffs
 
@@ -65,11 +67,12 @@ end
 PolynomialApproximant(p::AbstractVector{T}, dom::NTuple{2, T}, err::T) where {T <: AbstractFloat} = RationalApproximant(p, ones(T, 1), dom, err)
 
 function (res::RationalApproximant{T})(x) where {T <: AbstractFloat}
-    pₓ = ChebFun(T, res.p, res.dom)(T(x))
+    x = T(x)
+    pₓ = ChebFun(T, res.p, res.dom)(x)
     if length(res.q) <= 1
         return pₓ
     else
-        qₓ = ChebFun(T, res.q, res.dom)(T(x))
+        qₓ = ChebFun(T, res.q, res.dom)(x)
         return pₓ / qₓ
     end
 end
@@ -95,7 +98,7 @@ function Base.show(io::IO, rat::RationalApproximant{T}) where {T <: AbstractFloa
     μ, σ = is_unit ? (zero(T), one(T)) : (rnd((dom[1] + dom[2]) / 2), rnd((dom[2] - dom[1]) / 2))
     num, den = ChebyshevT{Float64, var}(rnd.(p)), ChebyshevT{Float64, var}(rnd.(q))
     println(io, "RationalApproximant{", T, "}")
-    println(io, "  Type:   (m, n) = (", m, ", ", n, ")")
+    println(io, "  Type:   m / n = ", m, " / ", n)
     println(io, "  Domain: ", rnd(dom[1]), " ≤ x ≤ ", rnd(dom[2]))
     println(io, "  Error:  |f(x) - ", (n == 0 ? "p(x)" : "p(x) / q(x)"), "| ⪅ ", rnd(err))
     println(io, "  Approximant:")
@@ -525,7 +528,7 @@ function postprocess(p::AbstractVector{T}, q::AbstractVector{T}, λ::T, o::CFOpt
     end
 
     # Normalize the coefficients
-    normalize_chebrational!(p, q)
+    normalize_rational!(p, q)
 
     # Rescale the outputs
     p .*= o.vscale
@@ -570,7 +573,7 @@ function pade(c::AbstractVector{T}, m, n) where {T <: AbstractFloat}
     end
 
     # Normalize the coefficients
-    normalize_chebrational!(p, q)
+    normalize_rational!(p, q)
 
     return p, q
 end
@@ -720,7 +723,7 @@ function RationalMinimaxWorkspace(f::AbstractVector{T}, p::AbstractVector{T}, q:
     nx = m + n + 2 + (o.parity === :even || o.parity === :odd) # extra root expected for even/odd symmetry
     f, p, q = Vector(f), Vector(p), Vector(q)
     f = f[1:min(end - 1, o.maxdegree)+1] # truncate to maxdegree
-    normalize_chebrational!(p, q) # normalize such that Q(0) = 1
+    normalize_rational!(p, q)
     Pₓ, Qₓ, Eₓ, Sₓ, δp_δq_δε = ntuple(_ -> zeros(T, nx), 5)
     J, rhs = zeros(T, nx, m + n + 2), zeros(T, nx) # J may have more rows than columns for symmetric inputs
     return RationalMinimaxWorkspace(f, p, q, Pₓ, Qₓ, Eₓ, Sₓ, δp_δq_δε, J, rhs, o.stepsize)
@@ -742,6 +745,10 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T
 
         # Update difference functional
         R = Fun(x -> P(x) / Q(x), ChebSpace(T)) # Note: typically faster than P / Q since we know Q has no roots in [-1, 1] and thence we can avoid an `ApproxFun.roots` call
+        if ncoefficients(R) > o.maxdegree
+            !o.quiet && @warn "Rational approximant is poorly conditioned"
+            R = Fun(ChebSpace(T), coefficients(R)[1:o.maxdegree+1])
+        end
         δF = F - R
         iszero(δF) && return postprocess(p, q, zero(T), o)
 
@@ -783,7 +790,7 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T
         δε = δp_δq_δε[m+n+2]
         @. p += γ * δp
         @. q[2:n+1] += γ * δq
-        normalize_chebrational!(p, q) # renormalize to Q(0) = 1
+        normalize_rational!(p, q)
 
         if abs(δε) <= max(o.rtol * ε, o.atol) || maximum(abs, δp) <= max(o.rtol * maximum(abs, p), o.atol) || maximum(abs, δq) <= max(o.rtol * maximum(abs, q), o.atol)
             # Newton step is small enough, so we're done
@@ -890,7 +897,7 @@ function local_minimax_nodes(δF::Fun)
     if precision(T) > precision(Float64)
         if check_signs(δfₓ; quiet = true)
             # Found alternating sequence of errors; refine the initial nodes with higher precision
-            refine_chebroots!(∇δF, x)
+            refine_roots!(∇δF, x)
             !issorted(x) && sort!(x) # should always remain sorted, but just in case
             δfₓ .= δF.(x)
         else
@@ -904,8 +911,24 @@ function local_minimax_nodes(δF::Fun)
     return x, δfₓ, succ
 end
 
+function refine_roots!(fun::Fun, ∇fun::Fun, x::AbstractVector{T}) where {T <: AbstractFloat}
+    # Refine roots using Newton's method
+    isempty(x) && return x
+    Δx = zero(x)
+    Δxmax = T(Inf)
+    maxiter = ceil(Int, log2(-log2(eps(T)))) # relative error should be ~eps(Float64) to start, and Newton's method squares the error each iteration
+    for i in 1:maxiter
+        Δx .= extrapolate.((fun,), x) ./ extrapolate.((∇fun,), x) # note: Δx is invariant to the scale of fun
+        x .-= Δx
+        Δxmax, Δxmax_prev = maximum(abs, Δx), Δxmax
+        (Δxmax <= 5 * eps(T) || (Δxmax < √eps(T) && Δxmax > Δxmax_prev / 2)) && break
+    end
+    return x
+end
+refine_roots!(fun::Fun, x::AbstractVector{T}) where {T <: AbstractFloat} = refine_roots!(fun, ApproxFun.differentiate(fun), x)
+
 function minimax_constant_polynomial(f::AbstractVector{T}, o::MinimaxOptions{T}) where {T <: AbstractFloat}
-    lo, hi = extrema(Fun(ChebSpace(T), f))
+    lo, hi = chebrange(f)
     p, ε = [T(lo + hi) / 2], T(hi - lo) / 2
     return PolynomialApproximant(p, o.dom, ε)
 end
@@ -1047,23 +1070,12 @@ function scale_rational!(p::AbstractVector{T}, q::AbstractVector{T}, q₀::T) wh
     q ./= q₀
     return p, q
 end
+
 normalize_rational!(p::AbstractVector, q::AbstractVector) = scale_rational!(p, q, first(q))
 normalize_rational(p::AbstractVector, q::AbstractVector) = normalize_rational!(copy(p), copy(q))
 
-function chebpoly_eval_at_zero(c::AbstractVector{T}) where {T <: AbstractFloat}
-    # Compute P(0) for a Chebyshev series P(x) = ∑ₖ cₖ Tₖ(x).
-    p₀ = zero(T)
-    sgn = +1
-    for k in 1:2:length(c)
-        p₀ += sgn * c[k] # Tₖ(0) = {+1 if k ≡ 0 (mod 4), -1 if k ≡ 2 (mod 4)}
-        sgn = -sgn
-    end
-    return p₀
-end
-normalize_chebpoly!(p::AbstractVector) = p ./= chebpoly_eval_at_zero(p)
+normalize_chebpoly!(p::AbstractVector) = p ./= chebeval_at_midpoint(p)
 normalize_chebpoly(p::AbstractVector) = normalize_chebpoly!(copy(p))
-normalize_chebrational!(p::AbstractVector, q::AbstractVector) = scale_rational!(p, q, chebpoly_eval_at_zero(q))
-normalize_chebrational(p::AbstractVector, q::AbstractVector) = normalize_chebrational!(copy(p), copy(q))
 
 function parity(c::AbstractVector{T}; rtol = eps(T)) where {T <: AbstractFloat}
     (length(c) <= 1) && return :even # constant function
@@ -1108,16 +1120,47 @@ paritychop(c::AbstractVector, parity::Symbol) = convert(Vector, lazyparitychop(c
 vscale(fun::Fun) = vscale(coefficients(fun))
 vscale(c::AbstractVector{T}) where {T <: AbstractFloat} = sum(abs, c; init = zero(T))
 
-function chebrange(fun::Fun)
+function chebeval_at_midpoint(c::AbstractVector{T}) where {T <: AbstractFloat}
+    # Compute f(0) for a Chebyshev series f(x) = ∑ₖ cₖ Tₖ(x).
+    f₀ = zero(T)
+    c′ = @views c[1:2:end] # even coefficients
+    for k in length(c′)-1:-1:0
+        c₂ₖ = c′[k+1]
+        f₀ += ifelse(iseven(k), c₂ₖ, -c₂ₖ) # Tₖ(0) = {+1 if k ≡ 0 (mod 4), -1 if k ≡ 2 (mod 4)}
+    end
+    return f₀
+end
+chebeval_at_midpoint(f::Fun) = chebeval_at_midpoint(coefficients(f))
+
+function chebeval_at_endpoints(c::AbstractVector{T}) where {T <: AbstractFloat}
+    # Compute f(-1) and f(+1) for a Chebyshev series f(x) = ∑ₖ cₖ Tₖ(x).
+    f⁻ = f⁺ = zero(T)
+    for k in length(c)-1:-1:0
+        cₖ = c[k+1]
+        f⁻ += ifelse(iseven(k), cₖ, -cₖ) # Tₖ(-1) = {+1 if k ≡ 0 (mod 2), -1 if k ≡ 2 (mod 2)}
+        f⁺ += cₖ # Tₖ(+1) = +1
+    end
+    return f⁻, f⁺
+end
+chebeval_at_endpoints(f::Fun) = chebeval_at_endpoints(coefficients(f))
+
+function chebrange(f::AbstractVector{T}) where {T <: AbstractFloat}
     # Compute the infinity norm of a Fun
-    fun = ChebFun(coefficients(fun)) # transfer to [-1, 1]
-    fa, fb = minmax(chebeval_endpoints(fun)...)
+    fun = Fun(ChebSpace(T), f)
+    fa, fb = minmax(chebeval_at_endpoints(fun)...)
     x = chebroots(ApproxFun.differentiate(fun))
     isempty(x) && return fa, fb
     flo, fhi = extrema(fun, x)
     return min(fa, flo), max(fb, fhi)
 end
+chebrange(fun::Fun) = chebrange(coefficients(fun))
 chebinfnorm(fun::Fun) = max(abs.(chebrange(fun))...)
+
+#### Rootfinding utilities
+
+# The below code is largely taken from ApproxFunOrthogonalPolynomials.jl, adjusted to work for generic types:
+#   https://github.com/JuliaApproximation/ApproxFunOrthogonalPolynomials.jl/blob/90d8cbe03adb2d95c50c165377d4f20a02d2d1e6/src/roots.jl#L82
+# TODO: Extend this code to work with complex coefficients and upstream to ApproxFunOrthogonalPolynomials.jl
 
 function chebroots(c::AbstractVector{T}; htol = 100 * eps(T)) where {T <: AbstractFloat}
     scale = vscale(c)
@@ -1129,62 +1172,13 @@ function chebroots(c::AbstractVector{T}; htol = 100 * eps(T)) where {T <: Abstra
     r = recurse_chebroots(c, htol)
 
     # Check endpoints, which are prone to inaccuracy
-    f⁻, f⁺ = chebeval_endpoints(c)
+    f⁻, f⁺ = chebeval_at_endpoints(c)
     (isempty(r) || !isapprox(last(r), one(T); atol = htol)) && (abs(f⁺) < htol) && push!(r, one(T))
     (isempty(r) || !isapprox(first(r), -one(T); atol = htol)) && (abs(f⁻) < htol) && pushfirst!(r, -one(T))
 
     return r
 end
 chebroots(f::Fun; kwargs...) = chebroots(coefficients(f); kwargs...)
-
-function chebeval_endpoints(c::AbstractVector{T}) where {T <: AbstractFloat}
-    f⁻ = f⁺ = zero(T)
-    for i in length(c):-1:1
-        cᵢ = c[i]
-        f⁻ += ifelse(iseven(i), -cᵢ, cᵢ) # f(-1)
-        f⁺ += cᵢ # f(+1)
-    end
-    return f⁻, f⁺
-end
-chebeval_endpoints(f::Fun) = chebeval_endpoints(coefficients(f))
-
-function prune_chebroots!(r::AbstractVector{C}, htol::T) where {T <: AbstractFloat, C <: Union{T, Complex{T}}}
-    r = filter!(z -> abs(imag(z)) < htol && abs(real(z)) <= 1 + htol, r) # keep roots that lie in [-1 - htol, 1 + htol] x [-htol, htol]
-    return clamp.(real.(r), -one(T), one(T)) # return real part clamped to [-1, 1]
-end
-
-function refine_chebroots!(fun::Fun, ∇fun::Fun, x::AbstractVector{T}) where {T <: AbstractFloat}
-    # Refine roots using Newton's method
-    isempty(x) && return x
-    Δx = zero(x)
-    Δxmax = T(Inf)
-    maxiter = ceil(Int, log2(-log2(eps(T)))) # relative error should be ~eps(Float64) to start, and Newton's method squares the error each iteration
-    for i in 1:maxiter
-        Δx .= extrapolate.((fun,), x) ./ extrapolate.((∇fun,), x) # note: Δx is invariant to the scale of fun
-        x .-= Δx
-        Δxmax, Δxmax_prev = maximum(abs, Δx), Δxmax
-        (Δxmax <= 5 * eps(T) || (Δxmax < √eps(T) && Δxmax > Δxmax_prev / 2)) && break
-    end
-    return x
-end
-refine_chebroots!(fun::Fun, x::AbstractVector{T}) where {T <: AbstractFloat} = refine_chebroots!(fun, ApproxFun.differentiate(fun), x)
-
-function colleague_matrix(c::AbstractVector{T}) where {T <: Number}
-    # Form the colleague matrix from the Chebyshev coefficients `c`
-    n = length(c) - 1
-    A = zeros(T, n, n)
-
-    for k in 1:n-1
-        A[k+1, k] = T(0.5)
-        A[k, k+1] = T(0.5)
-    end
-    for k in 1:n
-        A[1, end-k+1] -= T(0.5) * c[k] / c[end]
-    end
-    A[n, n-1] = one(T)
-
-    return A
-end
 
 function recurse_chebroots(c::AbstractVector{T}, htol::T) where {T <: AbstractFloat}
     # Compute the real roots contained in [-1, 1] of a polynomial in the Chebyshev basis
@@ -1219,10 +1213,53 @@ function recurse_chebroots(c::AbstractVector{T}, htol::T) where {T <: AbstractFl
         f2 = Fun(x -> f(muladd(a⁺, x, b⁺)), ChebSpace(T))
 
         # Recurse and map roots back to original interval
-        r1 = muladd.(a⁻, recurse_chebroots(coefficients(f1), htol), b⁻)
-        r2 = muladd.(a⁺, recurse_chebroots(coefficients(f2), htol), b⁺)
+        r1 = muladd.(a⁻, recurse_chebroots(coefficients(f1), 2 * htol), b⁻) # absolute tolerance on the stretched out half interval is double the absolute tolerance on the original interval
+        r2 = muladd.(a⁺, recurse_chebroots(coefficients(f2), 2 * htol), b⁺)
         return [r1; r2]
     end
+end
+
+function prune_chebroots!(r::AbstractVector{C}, htol::T) where {T <: AbstractFloat, C <: Union{T, Complex{T}}}
+    r = filter!(z -> abs(imag(z)) < htol && abs(real(z)) <= 1 + htol, r) # keep roots that lie in [-1 - htol, 1 + htol] x [-htol, htol]
+    return clamp.(real.(r), -one(T), one(T)) # return real part clamped to [-1, 1]
+end
+
+function colleague_matrix(c::AbstractVector{T}) where {T <: Number}
+    # Form the colleague matrix from a vector `c` of Chebyshev coefficients
+    n = length(c) - 1
+    A = zeros(T, n, n)
+
+    for k in 1:n-1
+        A[k+1, k] = T(0.5)
+        A[k, k+1] = T(0.5)
+    end
+    for k in 1:n
+        A[1, end-k+1] -= T(0.5) * c[k] / c[end]
+    end
+    A[n, n-1] = one(T)
+
+    return A
+end
+
+#### Precompile
+
+function precompile()
+    # Note: BigFloat is not worth precompiling; it makes precompilation take way longer,
+    # and TTFX is not dominated by precompilation time for BigFloat anyway.
+    for T in [Float32, Float64, Double64]
+        # Oscillatory function with many zeros and relatively long Chebyshev series
+        fun = ChebFun(T, x -> exp(-4x^2) * (1 + 2 * sinpi(10x)))
+        @assert length(chebroots(fun)) == 20
+    end
+    for T in [Float32, Float64, Double64], f in [exp, cospi, sinpi], dom in [(-1f0, 1f0), (-0.97f0, 1.32f0)], (m, n) in [(2, 3), (3, 2)]
+        # Minimax with generic, even, and odd functions with relatively short Chebyshev series.
+        # Note: minimax calls rationalcf/polynomialcf internally, so don't need to separately precompile those.
+        minimax(f, T.(dom), m, n)
+    end
+end
+
+@compile_workload begin
+    precompile()
 end
 
 end # module CaratheodoryFejerApprox

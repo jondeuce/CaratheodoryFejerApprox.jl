@@ -1,7 +1,8 @@
 using CaratheodoryFejerApprox
 
 using ApproxFun: Chebyshev, Fun, Interval
-using CaratheodoryFejerApprox: ChebFun, chebeval_endpoints, chebrange, chebroots, chebinfnorm, lazychopcoeffs, parity, normalize_rational
+using CaratheodoryFejerApprox: ChebFun, chebrange, chebroots, chebinfnorm, lazychopcoeffs, parity, normalize_rational
+using DoubleFloats: Double64
 using Statistics: mean
 
 runge(x) = 1 / (1 + 25x^2)

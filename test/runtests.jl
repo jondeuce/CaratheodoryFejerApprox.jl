@@ -10,9 +10,9 @@ include("utils.jl")
     end
 
     if get(ENV, "CI", "false") == "false"
+        # Only run Matlab tests if testing locally
         @testset "Matlab Tests" verbose = true begin
-            # Only run Chebfun tests if testing locally
-            include("chebfun.jl")
+            include("matlab_tests.jl")
         end
     end
 
