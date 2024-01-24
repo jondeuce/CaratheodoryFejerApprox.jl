@@ -285,9 +285,7 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
     # Compute Chebyshev coefficients of approximation R̃(x) (eqn. 1.7b[2]) from the Laurent coefficients
     # of the Blaschke product b(z) (eqn. 1.6b[2]) via FFT
     N = max(nextpow(2, length(u)), o.minnfft)
-    c̃ = zeros(T, m + 1) # Chebyshev coefficients of R̃(x): [c̃₀, c̃₁, ..., c̃ₘ] = [2*a₀, a₁ + a₋₁, ..., aₘ + a₋ₘ]
-    c̃_prev = copy(c̃)
-    Δc̃ = T(Inf)
+    c̃, c̃_prev, Δc̃ = zeros(T, m + 1), zeros(T, m + 1), T(Inf) # Chebyshev coefficients of R̃(x): [c̃₀, c̃₁, ..., c̃ₘ] = [2*a₀, a₁ + a₋₁, ..., aₘ + a₋ₘ]
     while true
         c̃_prev, c̃ = c̃, c̃_prev
         c̃_full = blaschke_laurent_coeffs(u, N, M) # Laurent coefficients of R̃(x): [a₀, a₁, ..., aₖ₋₁, a₋ₖ, ..., a₋₁] where k = N ÷ 2
@@ -297,8 +295,7 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
         Δc̃_prev, Δc̃ = Δc̃, maximum(abs, c̃ - c̃_prev)
         ((N *= 2) > o.maxnfft || (Δc̃ < √o.rtolfft * maximum(abs, c̃) && Δc̃ > Δc̃_prev / 2) || isapprox(c̃, c̃_prev; rtol = o.rtolfft)) && break
     end
-
-    @views c̃ .= a[end:-1:end-m] .- λ .* c̃ # (eqn. 1.7b[2])
+    @views c̃ .= a[end:-1:end-m] .- λ .* c̃ # Chebyshev coefficients of R̃(x) (eqn. 1.7b[2])
     λ = abs(λ)
 
     # Compute the polynomial q₁(z) via incomplete factorization (sec. 3.2[3]) of the denominator of the Blaschke product b(z) (eqn. 1.6b[2]).
@@ -306,9 +303,7 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
     # noting that the numerator of b(z) is the reciprocal polynomial zⁿ⋅b(z⁻¹) of the denominator.
     N = max(nextpow(2, length(u)), o.minnfft)
     ∇u = polyder(u)
-    s̃ = zeros(T, n)
-    s̃_prev = copy(s̃)
-    Δs̃ = T(Inf)
+    s̃, s̃_prev, Δs̃ = zeros(T, n), zeros(T, n), T(Inf)
     while true
         s̃_prev, s̃ = s̃, s̃_prev
         @views s̃ .= incomplete_factorization_laurent_coeffs(u, ∇u, N)[end-n:end-1]
@@ -597,6 +592,8 @@ Base.@kwdef struct MinimaxOptions{T <: AbstractFloat}
     maxiter::Int = 25
     "Step size for Newton iteration"
     stepsize::T = one(T)
+    "Clip step size of Newton iteration"
+    stepclip::T = T(0.05)
     "Suppress warnings"
     quiet::Bool = false
 end
@@ -625,20 +622,18 @@ struct PolynomialMinimaxWorkspace{T <: AbstractFloat}
     δf::Vector{T}
     p::Vector{T}
     Eₓ::Vector{T}
-    Sₓ::Vector{T}
     δp_δε::Vector{T}
     J::Matrix{T}
     rhs::Vector{T}
-    γ::T
 end
 function PolynomialMinimaxWorkspace(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T}) where {T <: AbstractFloat}
     m = length(p) - 1
     nx = m + 2 + (o.parity === :even || o.parity === :odd) # extra root expected for even/odd symmetry
-    f, p = Vector(f), Vector(p)
+    f, p = copy(f), copy(p)
     f = f[1:min(end - 1, o.maxdegree)+1] # truncate to maxdegree
-    Eₓ, Sₓ, δp_δε = ntuple(_ -> zeros(T, nx), 3)
+    Eₓ, δp_δε = zeros(T, nx), zeros(T, nx)
     J, rhs = zeros(T, nx, m + 2), zeros(T, nx)
-    return PolynomialMinimaxWorkspace(f, copy(f), p, Eₓ, Sₓ, δp_δε, J, rhs, o.stepsize)
+    return PolynomialMinimaxWorkspace(f, copy(f), p, Eₓ, δp_δε, J, rhs)
 end
 
 function minimax(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T}) where {T <: AbstractFloat}
@@ -648,7 +643,7 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T
 
     iter = 0
     @views while true
-        local (; f, δf, p, Eₓ, Sₓ, δp_δε, J, rhs, γ) = workspace
+        local (; f, δf, p, Eₓ, δp_δε, J, rhs) = workspace
         δF = Fun(ChebSpace(T), δf)
         nx = length(rhs)
 
@@ -657,11 +652,10 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T
         iszero(δF) && return postprocess(p, zero(T), o)
 
         # Compute new local extrema
-        x, δFₓ = minimax_nodes(δF, δF', nx)
+        x, δFₓ, Sₓ = minimax_nodes(δF, δF', nx)
         nx₀ = length(x)
         nx′ = min(nx₀, nx)
         @. Eₓ[1:nx′] = abs(δFₓ[1:nx′]) # error at each root
-        @. Sₓ[1:nx′] = floatsign(δFₓ[1:nx′]) # sign of error at each root
         εmin, εmax = extrema(Eₓ[1:nx′])
         ε, σε = (εmax + εmin) / 2, (εmax - εmin) / 2
 
@@ -689,7 +683,7 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T
         # Damped Newton step
         δp = δp_δε[1:m+1]
         δε = δp_δε[m+2]
-        @. p += γ * δp
+        @. p += o.stepsize * δp
 
         if abs(δε) <= max(o.rtol * ε, o.atol) || maximum(abs, δp) <= max(o.rtol * maximum(abs, p), o.atol)
             # Newton step is small enough, so we're done
@@ -709,23 +703,24 @@ struct RationalMinimaxWorkspace{T <: AbstractFloat}
     f::Vector{T}
     p::Vector{T}
     q::Vector{T}
+    p₀::Vector{T}
+    q₀::Vector{T}
     Pₓ::Vector{T}
     Qₓ::Vector{T}
     Eₓ::Vector{T}
-    Sₓ::Vector{T}
     δp_δq_δε::Vector{T}
     J::Matrix{T}
     rhs::Vector{T}
-    γ::T
 end
 function RationalMinimaxWorkspace(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T}, o::MinimaxOptions{T}) where {T <: AbstractFloat}
     m, n = length(p) - 1, length(q) - 1
     nx = m + n + 2 + (o.parity === :even || o.parity === :odd) # extra root expected for even/odd symmetry
-    f, (p, q) = Vector(f), normalize_chebrational!(Vector(p), Vector(q))
+    f, (p, q) = copy(f), normalize_unitrational(p, q)
+    p₀, q₀ = copy(p), copy(q)
     f = f[1:min(end - 1, o.maxdegree)+1] # truncate to maxdegree
-    Pₓ, Qₓ, Eₓ, Sₓ, δp_δq_δε = ntuple(_ -> zeros(T, nx), 5)
+    Pₓ, Qₓ, Eₓ, δp_δq_δε = ntuple(_ -> zeros(T, nx), 4)
     J, rhs = zeros(T, nx, m + n + 2), zeros(T, nx) # J may have more rows than columns for symmetric inputs
-    return RationalMinimaxWorkspace(f, p, q, Pₓ, Qₓ, Eₓ, Sₓ, δp_δq_δε, J, rhs, o.stepsize)
+    return RationalMinimaxWorkspace(f, p, q, p₀, q₀, Pₓ, Qₓ, Eₓ, δp_δq_δε, J, rhs)
 end
 
 function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T}, o::MinimaxOptions{T}) where {T <: AbstractFloat}
@@ -736,7 +731,7 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T
 
     iter = 0
     @views while true
-        local (; f, p, q, Pₓ, Qₓ, Eₓ, Sₓ, δp_δq_δε, J, rhs, γ) = workspace
+        local (; f, p, q, p₀, q₀, Pₓ, Qₓ, Eₓ, δp_δq_δε, J, rhs) = workspace
         F = Fun(ChebSpace(T), f)
         P = Fun(ChebSpace(T), p)
         Q = Fun(ChebSpace(T), q)
@@ -745,14 +740,13 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T
 
         # Compute new extremal nodes
         ∇δF_pseudo = (F' * Q - P') * Q + P * Q' # numerator of (F - P/Q)' = F' - (P'Q - PQ')/Q²
-        x, δFₓ = minimax_nodes(δF, ∇δF_pseudo, nx)
+        x, δFₓ, Sₓ = minimax_nodes(δF, ∇δF_pseudo, nx)
         nx₀ = length(x)
         nx′ = min(nx₀, nx)
 
         @. Qₓ[1:nx′] = Q(x[1:nx′])
         @. Pₓ[1:nx′] = P(x[1:nx′])
         @. Eₓ[1:nx′] = abs(δFₓ[1:nx′]) # error at each root
-        @. Sₓ[1:nx′] = floatsign(δFₓ[1:nx′]) # sign of error at each root
         εmin, εmax = extrema(Eₓ[1:nx′])
         ε, σε = (εmax + εmin) / 2, (εmax - εmin) / 2
 
@@ -781,9 +775,18 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T
         δp = δp_δq_δε[1:m+1]
         δq = δp_δq_δε[m+2:m+n+1]
         δε = δp_δq_δε[m+n+2]
-        @. p += γ * δp
-        @. q[2:n+1] += γ * δq
-        normalize_chebrational!(p, q)
+        copy!.((p₀, q₀), (p, q))
+        @. p += clamp(o.stepsize * δp, -o.stepclip, o.stepclip)
+        @. q[2:n+1] += clamp(o.stepsize * δq, -o.stepclip, o.stepclip)
+
+        if !isempty(chebroots(Q))
+            !o.quiet && @warn "Newton step created pole(s) in the denominator of the rational approximant; exiting early"
+            copy!.((p, q), (p₀, q₀))
+            check_signs(Sₓ; o.quiet)
+            return postprocess(p, q, ε, o)
+        else
+            normalize_unitrational!(p, q)
+        end
 
         if abs(δε) <= max(o.rtol * ε, o.atol) || maximum(abs, δp) <= max(o.rtol * maximum(abs, p), o.atol) || maximum(abs, δq) <= max(o.rtol * maximum(abs, q), o.atol)
             # Newton step is small enough, so we're done
@@ -856,93 +859,104 @@ end
     return J
 end
 
-function minimax_nodes(f, ∇f_pseudo::Fun, nnodes::Int; atol = 100 * eps(floattype(∇f_pseudo)))
+function minimax_nodes(f, ∇f_pseudo::Fun{<:Chebyshev, T}, nnodes::Int; atol::T = 100 * eps(T)) where {T <: AbstractFloat}
     @assert nnodes >= 2
 
-    # Local extremal nodes
-    x, δfₓ, _ = local_minimax_nodes(f, ∇f_pseudo)
+    # Local extremal nodes. Note: Sₓ = +1 for local maxima, -1 for local minima, but it is *not* necessarily the sign of f(x)
+    x, fₓ, Sₓ = local_minimax_nodes(f, ∇f_pseudo)
 
     # Check endpoints for extrema
     x₀, x₁ = endpoints(domain(∇f_pseudo))
-    δf₀, δf₁ = f(x₀), f(x₁)
-    isempty(x) && return [x₀; x₁], [δf₀; δf₁], floatsign(δf₀) == -floatsign(δf₁) # no interior extrema
+    f₀, f₁ = f(x₀), f(x₁)
+    isempty(x) && return [x₀; x₁], [f₀; f₁], f₀ <= f₁ ? T[-1, 1] : T[1, -1] # no interior extrema
 
     # Add both endpoints, if they are not already present
     if abs(x[1] - x₀) > atol
         x = pushfirst!(x, x₀)
-        δfₓ = pushfirst!(δfₓ, δf₀)
+        fₓ = pushfirst!(fₓ, f₀)
+        Sₓ = pushfirst!(Sₓ, -Sₓ[1])
     end
     if abs(x[end] - x₁) > atol
         x = push!(x, x₁)
-        δfₓ = push!(δfₓ, δf₁)
+        fₓ = push!(fₓ, f₁)
+        Sₓ = push!(Sₓ, -Sₓ[end])
     end
-    length(x) <= nnodes && return x, δfₓ, check_signs(δfₓ; quiet = true) # out of points to add, so we're done
+    length(x) <= nnodes && return x, fₓ, Sₓ # out of points to add, so we're done
 
-    # Added one too many points, so remove the one with smallest
-    while length(x) > nnodes
-        # Often, one of the endpoints is a spurious extrema; remove the endpoints with the smallest error
-        if abs(δfₓ[1]) <= abs(δfₓ[end])
-            popfirst!(x)
-            popfirst!(δfₓ)
-        else
-            pop!(x)
-            pop!(δfₓ)
+    # Have too many points; choose the streak of `nnodes` nodes with the signed sum of errors
+    ibest, errbest = 0, T(-Inf)
+    for i in 1:length(x) - nnodes + 1
+        err = sum(@views Sₓ[i:i+nnodes-1] .* fₓ[i:i+nnodes-1]) # signed sum of errors rewards large errors with the correct sign
+        if err > errbest
+            ibest, errbest = i, err
         end
     end
-    return x, δfₓ, check_signs(δfₓ; quiet = true)
+    x = x[ibest:ibest+nnodes-1]
+    fₓ = fₓ[ibest:ibest+nnodes-1]
+    Sₓ = Sₓ[ibest:ibest+nnodes-1]
+
+    return x, fₓ, Sₓ
 end
 
 function local_minimax_nodes(f, ∇f_pseudo::Fun)
-    # NOTE: ∇f_pseudo(x) need only be pointwise proportional to ∇fun(x),
-    # i.e. ∇f_pseudo(x) = ∇fun(x) * g(x), where g(x) != 0 ∀ x ∈ [-1, 1].
-    ∇δf = coefficients(∇f_pseudo)
-    T = eltype(∇δf)
+    # Compute local extrema of f(x). Note the following:
+    #   - ∇f_pseudo(x) need only be pointwise proportional to ∇fun(x), i.e. ∇f_pseudo(x) = ∇fun(x) * g(x), where g(x) != 0 ∀ x ∈ domain(f)
+    #   - Sₓ = +1 for local maxima, -1 for local minima, but it is *not* necessarily the sign of f(x)
+    ∇f = coefficients(∇f_pseudo)
+    T = eltype(∇f)
 
     # Use at least 64-bit precision for initial node computation
-    x = convert(Vector{T}, chebroots(convert(Vector{Float64}, ∇δf)))
-    δfₓ = f.(x)
+    x = convert(Vector{T}, chebroots(convert(Vector{Float64}, ∇f)))
+    fₓ = f.(x)
 
     if precision(T) > precision(Float64)
-        if check_signs(δfₓ; quiet = true)
+        if check_signs(fₓ; quiet = true)
             # Found alternating sequence of errors; refine the initial nodes with higher precision
-            refine_roots!(∇f_pseudo, x)
+            x, Sₓ = refine_roots!(∇f_pseudo, x)
             !issorted(x) && sort!(x) # should always remain sorted, but just in case
-            δfₓ .= f.(x)
+            @. fₓ = f(x)
         else
             # Computing nodes in lower precision failed to produce an alternating sequence of errors; try again in higher precision
-            x = chebroots(∇δf)
-            δfₓ = f.(x)
+            ∇²f_pseudo = ∇f_pseudo'
+            x = chebroots(∇f)
+            fₓ = @. f(x)
+            Sₓ = @. -floatsign(∇²f_pseudo(x))
         end
+    else
+        ∇²f_pseudo = ∇f_pseudo'
+        Sₓ = @. -floatsign(∇²f_pseudo(x))
     end
 
-    succ = check_signs(δfₓ; quiet = true)
-    return x, δfₓ, succ
+    return x, fₓ, Sₓ
 end
 
 function refine_roots!(∇fun::Fun, ∇²fun::Fun, x::AbstractVector{T}) where {T <: AbstractFloat}
     # Refine roots using Newton's method
     isempty(x) && return x
-    Δx = zero(x)
-    Δxmax = T(Inf)
+    Δx, ∇fₓ, ∇²fₓ, Sₓ = zero(x), zero(x), zero(x), zero(x)
+    Δx_max = T(Inf)
     maxiter = ceil(Int, log2(-log2(eps(T)))) # relative error should be ~eps(Float64) to start, and Newton's method squares the error each iteration
     for i in 1:maxiter
-        Δx .= extrapolate.((∇fun,), x) ./ extrapolate.((∇²fun,), x) # note: Δx is invariant to the scale of ∇fun
-        x .-= Δx
-        Δxmax, Δxmax_prev = maximum(abs, Δx), Δxmax
-        (Δxmax <= 5 * eps(T) || (Δxmax < √eps(T) && Δxmax > Δxmax_prev / 2)) && break
+        ∇fₓ .= extrapolate.((∇fun,), x)
+        ∇²fₓ .= extrapolate.((∇²fun,), x)
+        @. Sₓ = -floatsign(∇²fₓ) # +1 for local maximum, -1 for local minimum
+        @. Δx = ∇fₓ / ∇²fₓ # note: Δx is invariant to the scale of ∇fun
+        @. x -= Δx
+        Δx_max, Δx_max_last = maximum(abs, Δx), Δx_max
+        (Δx_max <= 5 * eps(T) || (Δx_max < √eps(T) && Δx_max > Δx_max_last / 2)) && break
     end
-    return x
+    return x, Sₓ
 end
 refine_roots!(∇fun::Fun, x::AbstractVector{T}) where {T <: AbstractFloat} = refine_roots!(∇fun, ∇fun', x)
 
 function minimax_constant_polynomial(f::AbstractVector{T}, o::MinimaxOptions{T}) where {T <: AbstractFloat}
     lo, hi = chebrange(f)
     p, ε = [T(lo + hi) / 2], T(hi - lo) / 2
-    return PolynomialApproximant(p, o.dom, ε)
+    return postprocess(p, ε, o)
 end
 
 postprocess(p::AbstractVector{T}, ε::T, o::MinimaxOptions{T}) where {T <: AbstractFloat} = PolynomialApproximant(p, o.dom, ε)
-postprocess(p::AbstractVector{T}, q::AbstractVector{T}, ε::T, o::MinimaxOptions{T}) where {T <: AbstractFloat} = RationalApproximant(p, q, o.dom, ε)
+postprocess(p::AbstractVector{T}, q::AbstractVector{T}, ε::T, o::MinimaxOptions{T}) where {T <: AbstractFloat} = RationalApproximant(normalize_chebrational!(p, q)..., o.dom, ε)
 
 function check_signs(S; quiet = false)
     pass = all(S[i] == -S[i+1] for i in 1:length(S)-1)
@@ -1092,6 +1106,9 @@ normalize_chebpoly(p::AbstractVector) = normalize_chebpoly!(copy(p))
 normalize_chebrational!(p::AbstractVector, q::AbstractVector) = scale_rational!(p, q, chebeval_at_midpoint(q))
 normalize_chebrational(p::AbstractVector, q::AbstractVector) = normalize_chebrational!(copy(p), copy(q))
 
+normalize_unitrational!(p::AbstractVector, q::AbstractVector) = scale_rational!(p, q, √(sum(abs2, p) + sum(abs2, q)))
+normalize_unitrational(p::AbstractVector, q::AbstractVector) = normalize_unitrational!(copy(p), copy(q))
+
 function parity(c::AbstractVector{T}; rtol = eps(T)) where {T <: AbstractFloat}
     (length(c) <= 1) && return :even # constant function
     scale = vscale(c)
@@ -1228,9 +1245,9 @@ function recurse_chebroots(c::AbstractVector{T}, atol::T) where {T <: AbstractFl
         f2 = Fun(x -> f(muladd(a⁺, x, b⁺)), ChebSpace(T))
 
         # Recurse and map roots back to original interval
-        r1 = muladd.(a⁻, recurse_chebroots(coefficients(f1), 2 * atol), b⁻) # absolute tolerance on the stretched out half interval is double the absolute tolerance on the original interval
+        r1 = Threads.@spawn muladd.(a⁻, recurse_chebroots(coefficients(f1), 2 * atol), b⁻) # absolute tolerance on the stretched out half interval is double the absolute tolerance on the original interval
         r2 = muladd.(a⁺, recurse_chebroots(coefficients(f2), 2 * atol), b⁺)
-        return [r1; r2]
+        return [fetch(r1); r2]
     end
 end
 
@@ -1266,7 +1283,7 @@ function precompile()
         fun = ChebFun(T, x -> exp(-4x^2) * (1 + 2 * sinpi(10x)))
         @assert length(chebroots(fun)) == 20
     end
-    for T in [Float32, Float64, Double64], f in [exp, cospi, sinpi], dom in [(-1f0, 1f0), (-0.97f0, 1.32f0)], (m, n) in [(2, 3), (3, 2)]
+    for T in [Float32, Float64, Double64], f in [exp, cospi, sinpi], dom in [(-1.0f0, 1.0f0), (-0.97f0, 1.32f0)], (m, n) in [(2, 0), (3, 0), (2, 3), (3, 2)]
         # Minimax with generic, even, and odd functions with relatively short Chebyshev series.
         # Note: minimax calls rationalcf/polynomialcf internally, so don't need to separately precompile those.
         minimax(f, T.(dom), m, n)
