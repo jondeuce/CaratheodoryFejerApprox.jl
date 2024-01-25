@@ -41,11 +41,12 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 module CaratheodoryFejerApprox
 
+using AbstractFFTs: AbstractFFTs, Plan, irfft, plan_rfft, rfft
 using ApproxFun: ApproxFun, Chebyshev, ChebyshevInterval, ClosedInterval, Fun, Interval, coefficients, domain, endpoints, extrapolate, ncoefficients, space
 using ArnoldiMethod: ArnoldiMethod, partialschur
 using Arpack: Arpack, eigs
 using DoubleFloats: DoubleFloats, Double64
-using FFTW: FFTW, irfft, rfft
+using FFTW: FFTW # defines fast FFTs for real/complex Float32/Floa64
 using GenericFFT: GenericFFT # defines generic methods for FFTs
 using GenericLinearAlgebra: GenericLinearAlgebra # defines generic method for `LinearAlgebra.eigen` and `Polynomials.roots`
 using LinearAlgebra: LinearAlgebra, Hermitian, cholesky!, cond, diag, dot, eigen, eigvals, ldiv!, mul!, qr!
@@ -417,16 +418,21 @@ function blaschke_laurent_coeffs(u::AbstractVector{T}, N::Int, M::Int) where {T 
     # zeros to length N and the numerator is computed using the FFT. Additionally,
     # we save an FFT by using shift/reflect FFT identities to compute the denominator.
     d = length(u)
-    û = rfft(zeropad(u, N))
-    θ = (2 * (M - d + 1) // N) * (T(0):T(N ÷ 2))
-    b̂ = @. cispi(-θ) * z_div_conj_z(û)
-    return irfft(b̂, N)
+    θ = (2 * (M - d + 1) // N) * (T(0):T(N ÷ 2)) # denominator shifts
+    u = zeropad(u, N)
+    p = get_plan_rfft(u)
+    û = p * u
+    @. û = cispi(-θ) * z_div_conj_z(û)
+    return ldiv!(u, p, û) # output is equivalent to: irfft(cispi.(.-θ) .* z_div_conj_z.(rfft(zeropad(u, N))), N)
 end
 
 function incomplete_factorization_laurent_coeffs(u::AbstractVector{T}, ∇u::AbstractVector{T}, N::Int) where {T <: AbstractFloat}
-    û = rfft(zeropad(u, N))
-    dû = rfft(zeropad(∇u, N))
-    return irfft(dû ./ û, N)
+    # Compute Laurent coefficients of the incomplete factorization:
+    u, ∇u = zeropad(u, N), zeropad(∇u, N)
+    p = get_plan_rfft(u)
+    û, dû = p * u, p * ∇u
+    @. û = dû / û
+    return ldiv!(u, p, û) # output is equivalent to: irfft(rfft(zeropad(∇u, N)) ./ rfft(zeropad(u, N)), N)
 end
 
 function eigs_hankel(c::AbstractVector{T}; nev = 1) where {T <: AbstractFloat}
@@ -590,6 +596,8 @@ Base.@kwdef struct MinimaxOptions{T <: AbstractFloat}
     atol::T = 5 * eps(T)
     "Maximum number of iterations"
     maxiter::Int = 25
+    "Maximum number of Newton steps per iteration"
+    maxsteps::Int = 10
     "Step size for Newton iteration"
     stepsize::T = one(T)
     "Clip step size of Newton iteration"
@@ -652,7 +660,7 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T
         iszero(δF) && return postprocess(p, zero(T), o)
 
         # Compute new local extrema
-        x, δFₓ, Sₓ = minimax_nodes(δF, δF', nx)
+        x, δFₓ, Sₓ = minimax_nodes(δF, δF', nx; o.quiet)
         nx₀ = length(x)
         nx′ = min(nx₀, nx)
         @. Eₓ[1:nx′] = abs(δFₓ[1:nx′]) # error at each root
@@ -670,7 +678,6 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T
 
         if σε <= max(o.rtol * ε, o.atol)
             # Minimax variance sufficiently small
-            check_signs(Sₓ; o.quiet)
             return postprocess(p, ε, o)
         end
 
@@ -687,13 +694,11 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, o::MinimaxOptions{T
 
         if abs(δε) <= max(o.rtol * ε, o.atol) || maximum(abs, δp) <= max(o.rtol * maximum(abs, p), o.atol)
             # Newton step is small enough, so we're done
-            check_signs(Sₓ; o.quiet)
             return postprocess(p, ε, o)
         end
 
         if (iter += 1) > o.maxiter
             !o.quiet && @warn "Maximum number of Newton iterations reached"
-            check_signs(Sₓ; o.quiet)
             return postprocess(p, ε, o)
         end
     end
@@ -739,13 +744,13 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T
         nx = length(rhs)
 
         # Compute new extremal nodes
-        ∇δF_pseudo = (F' * Q - P') * Q + P * Q' # numerator of (F - P/Q)' = F' - (P'Q - PQ')/Q²
-        x, δFₓ, Sₓ = minimax_nodes(δF, ∇δF_pseudo, nx)
+        ∇δF_pseudo = (F' * Q - P') * Q + P * Q' # numerator of (F - P/Q)' = F' - (P'Q - PQ')/Q²; note that we assume Q(x) has no roots in [-1, 1]
+        x, δFₓ, Sₓ = minimax_nodes(δF, ∇δF_pseudo, nx; o.quiet)
         nx₀ = length(x)
         nx′ = min(nx₀, nx)
 
-        @. Qₓ[1:nx′] = Q(x[1:nx′])
         @. Pₓ[1:nx′] = P(x[1:nx′])
+        @. Qₓ[1:nx′] = Q(x[1:nx′])
         @. Eₓ[1:nx′] = abs(δFₓ[1:nx′]) # error at each root
         εmin, εmax = extrema(Eₓ[1:nx′])
         ε, σε = (εmax + εmin) / 2, (εmax - εmin) / 2
@@ -761,42 +766,54 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T
 
         if σε <= max(o.rtol * ε, o.atol)
             # Minimax variance sufficiently small
-            check_signs(Sₓ; o.quiet)
             return postprocess(p, q, ε, o)
         end
 
         # Newton iteration on the residual equation
-        #   G(p, q, ε) = P(x) / Q(x) + ε * S(x) - F(x) = 0
-        residual_jacobian!(J, x, Pₓ, Qₓ, Sₓ, m, n) # Jacobian of residual equation: dG/d[p; q; ε]
-        @. rhs = δFₓ - ε * Sₓ # right hand side: -G(p, q, ε)
-        ldiv!(δp_δq_δε, qr!(J), rhs) # solve for Newton step: [δp; δq; δε] = J \ rhs
+        #   G(p, q, ε) = P(x) + (ε * S(x) - F(x)) * Q(x) = 0
+        for i in 1:o.maxsteps
+            residual_jacobian!(J, x, Pₓ, Qₓ, δFₓ, Sₓ, ε, m, n) # Jacobian of residual equation: dG/d[p; q; ε]
+            @. rhs = (δFₓ - ε * Sₓ) * Qₓ # right hand side: -G(p, q, ε)
+            ldiv!(δp_δq_δε, qr!(J), rhs) # solve for Newton step: [δp; δq; δε] = J \ rhs
 
-        # Damped Newton step
-        δp = δp_δq_δε[1:m+1]
-        δq = δp_δq_δε[m+2:m+n+1]
-        δε = δp_δq_δε[m+n+2]
-        copy!.((p₀, q₀), (p, q))
-        @. p += clamp(o.stepsize * δp, -o.stepclip, o.stepclip)
-        @. q[2:n+1] += clamp(o.stepsize * δq, -o.stepclip, o.stepclip)
+            # Damped Newton step
+            δp = δp_δq_δε[1:m+1]
+            δq = δp_δq_δε[m+2:m+n+1]
+            δε = δp_δq_δε[m+n+2]
 
-        if !isempty(chebroots(Q))
-            !o.quiet && @warn "Newton step created pole(s) in the denominator of the rational approximant; exiting early"
-            copy!.((p, q), (p₀, q₀))
-            check_signs(Sₓ; o.quiet)
-            return postprocess(p, q, ε, o)
-        else
-            normalize_unitrational!(p, q)
-        end
+            copy!.((p₀, q₀), (p, q))
+            @. p += clamp(o.stepsize * δp, -o.stepclip, o.stepclip)
+            @. q[2:n+1] += clamp(o.stepsize * δq, -o.stepclip, o.stepclip)
+            ε += o.stepsize * δε
 
-        if abs(δε) <= max(o.rtol * ε, o.atol) || maximum(abs, δp) <= max(o.rtol * maximum(abs, p), o.atol) || maximum(abs, δq) <= max(o.rtol * maximum(abs, q), o.atol)
-            # Newton step is small enough, so we're done
-            check_signs(Sₓ; o.quiet)
-            return postprocess(p, q, ε, o)
+            if isempty(chebroots(Q))
+                # No poles in the denominator of the rational approximant
+                normalize_unitrational!(p, q)
+                @. Pₓ = P(x)
+                @. Qₓ = Q(x)
+                @. δFₓ = δF(x)
+                @. Eₓ = abs(δFₓ) # error at each root
+
+                εmin, εmax = extrema(Eₓ)
+                σε = (εmax - εmin) / 2
+                res = maximum(abs, @. δFₓ - ε * Sₓ) # maximum minimax residual
+
+                if res <= max(o.rtol * ε, o.atol) || σε <= max(o.rtol * ε, o.atol)
+                    # Minimax residual is small enough, so we're done
+                    break
+                elseif abs(δε) <= max(o.rtol * ε, o.atol) || maximum(abs, δp) <= max(o.rtol * maximum(abs, p), o.atol) || maximum(abs, δq) <= max(o.rtol * maximum(abs, q), o.atol)
+                    # Newton step is small enough, so we're done
+                    break
+                end
+            else
+                !o.quiet && @warn "Newton step created pole(s) in the denominator of the rational approximant; exiting early"
+                copy!.((p, q), (p₀, q₀))
+                return postprocess(p, q, ε, o)
+            end
         end
 
         if (iter += 1) > o.maxiter
             !o.quiet && @warn "Maximum number of Newton iterations reached"
-            check_signs(Sₓ; o.quiet)
             return postprocess(p, q, ε, o)
         end
     end
@@ -810,7 +827,7 @@ end
     @assert size(J) == (nx, m + 2)
     @assert length(Sₓ) == nx
 
-    # First m+1 columns: dG/dPⱼ = Tⱼ(x), j = 0, ..., m
+    # First m+1 columns: dG/dpⱼ = Tⱼ(x), j = 0, ..., m
     @. J[:, 1] = one(T) # T₀(x) = 1
     if m >= 1
         @. J[:, 2] = x # T₁(x) = x
@@ -825,15 +842,15 @@ end
     return J
 end
 
-@views function residual_jacobian!(J::AbstractMatrix{T}, x::AbstractVector{T}, Pₓ::AbstractVector{T}, Qₓ::AbstractVector{T}, Sₓ::AbstractVector{T}, m::Int, n::Int) where {T <: AbstractFloat}
+@views function residual_jacobian!(J::AbstractMatrix{T}, x::AbstractVector{T}, Pₓ::AbstractVector{T}, Qₓ::AbstractVector{T}, δFₓ::AbstractVector{T}, Sₓ::AbstractVector{T}, ε::T, m::Int, n::Int) where {T <: AbstractFloat}
     # Compute Jacobian of residual equation:
-    #   G(p, q, ε) = P(x) / Q(x) + ε * S(x) - F(x) = 0
+    #   G(p, q, ε) = P(x) + (ε * S(x) - F(x)) * Q(x) = 0
     nx = length(x)
     @assert nx >= m + n + 2
     @assert size(J) == (nx, m + n + 2)
-    @assert length(Pₓ) == length(Qₓ) == length(Sₓ) == nx
+    @assert length(Pₓ) == length(Qₓ) == length(δFₓ) == length(Sₓ) == nx
 
-    # First m+1 columns: dG/dPⱼ = Tⱼ(x) / Q(x), j = 0, ..., m
+    # First m+1 columns: dG/dpⱼ = Tⱼ(x), j = 0, ..., m
     @. J[:, 1] = one(T) # T₀(x) = 1
     if m >= 1
         @. J[:, 2] = x # T₁(x) = x
@@ -841,9 +858,8 @@ end
     for j in 3:m+1
         @. J[:, j] = 2x * J[:, j-1] - J[:, j-2] # Tⱼ(x) = 2x * Tⱼ₋₁(x) - Tⱼ₋₂(x)
     end
-    @. J[:, 1:m+1] /= Qₓ
 
-    # Next n columns: dG/dQⱼ = -P(x) * Tⱼ(x) / Q(x)², j = 1, ..., n
+    # Next n columns: dG/dqⱼ = (ε * S(x) - F(x)) * Tⱼ(x), j = 1, ..., n
     @. J[:, m+2] = x # T₁(x) = x
     if n >= 2
         @. J[:, m+3] = 2x^2 - 1 # T₂(x) = 2x² - 1
@@ -851,19 +867,21 @@ end
     for j in m+4:m+n+1
         @. J[:, j] = 2x * J[:, j-1] - J[:, j-2] # Tⱼ(x) = 2x * Tⱼ₋₁(x) - Tⱼ₋₂(x)
     end
-    @. J[:, m+2:m+n+1] *= -Pₓ / Qₓ^2
+    @. J[:, m+2:m+n+1] *= (ε * Sₓ - δFₓ) - Pₓ / Qₓ
 
-    # Last column: dG/dε = S(x)
-    @. J[:, m+n+2] = Sₓ
+    # Last column: dG/dε = S(x) * Q(x)
+    @. J[:, m+n+2] = Sₓ * Qₓ
 
     return J
 end
 
-function minimax_nodes(f, ∇f_pseudo::Fun{<:Chebyshev, T}, nnodes::Int; atol::T = 100 * eps(T)) where {T <: AbstractFloat}
+function minimax_nodes(f, ∇f_pseudo::Fun{<:Chebyshev, T}, nnodes::Int; atol::T = 100 * eps(T), quiet::Bool = false) where {T <: AbstractFloat}
     @assert nnodes >= 2
 
     # Local extremal nodes. Note: Sₓ = +1 for local maxima, -1 for local minima, but it is *not* necessarily the sign of f(x)
-    x, fₓ, Sₓ = local_minimax_nodes(f, ∇f_pseudo)
+    x, Sₓ = local_minimax_nodes(∇f_pseudo)
+    fₓ = @. f(x)
+    check_signs(Sₓ; quiet)
 
     # Check endpoints for extrema
     x₀, x₁ = endpoints(domain(∇f_pseudo))
@@ -883,9 +901,9 @@ function minimax_nodes(f, ∇f_pseudo::Fun{<:Chebyshev, T}, nnodes::Int; atol::T
     end
     length(x) <= nnodes && return x, fₓ, Sₓ # out of points to add, so we're done
 
-    # Have too many points; choose the streak of `nnodes` nodes with the signed sum of errors
+    # Have too many points; choose the streak of `nnodes` nodes with the maximum signed sum of errors
     ibest, errbest = 0, T(-Inf)
-    for i in 1:length(x) - nnodes + 1
+    for i in 1:length(x)-nnodes+1
         err = sum(@views Sₓ[i:i+nnodes-1] .* fₓ[i:i+nnodes-1]) # signed sum of errors rewards large errors with the correct sign
         if err > errbest
             ibest, errbest = i, err
@@ -898,41 +916,36 @@ function minimax_nodes(f, ∇f_pseudo::Fun{<:Chebyshev, T}, nnodes::Int; atol::T
     return x, fₓ, Sₓ
 end
 
-function local_minimax_nodes(f, ∇f_pseudo::Fun)
-    # Compute local extrema of f(x). Note the following:
-    #   - ∇f_pseudo(x) need only be pointwise proportional to ∇fun(x), i.e. ∇f_pseudo(x) = ∇fun(x) * g(x), where g(x) != 0 ∀ x ∈ domain(f)
-    #   - Sₓ = +1 for local maxima, -1 for local minima, but it is *not* necessarily the sign of f(x)
+function local_minimax_nodes(∇f_pseudo::Fun, ∇²f_pseudo::Fun = ∇f_pseudo')
+    # Compute local extrema of a function f(x).
+    #   - ∇f_pseudo(x) need only be pointwise proportional to ∇f(x), i.e. ∇f_pseudo(x) = ∇f(x) * g(x), where g(x) != 0 ∀ x ∈ domain(f)
+    #   - ∇²f_pseudo(x) = d/dx ∇f_pseudo(x), and Sₓ = +1 for local maxima, -1 for local minima
     ∇f = coefficients(∇f_pseudo)
     T = eltype(∇f)
 
     # Use at least 64-bit precision for initial node computation
     x = convert(Vector{T}, chebroots(convert(Vector{Float64}, ∇f)))
-    fₓ = f.(x)
+
+    # Compute sign of local extrema; +1 for local maxima, -1 for local minima
+    Sₓ = @. -floatsign(∇²f_pseudo(x))
 
     if precision(T) > precision(Float64)
-        if check_signs(fₓ; quiet = true)
-            # Found alternating sequence of errors; refine the initial nodes with higher precision
-            x, Sₓ = refine_roots!(∇f_pseudo, x)
-            !issorted(x) && sort!(x) # should always remain sorted, but just in case
-            @. fₓ = f(x)
+        if check_signs(Sₓ; quiet = true)
+            # Found alternating sequence of extrema; refine the initial nodes with higher precision
+            x, Sₓ = refine_roots!(∇f_pseudo, ∇²f_pseudo, x)
         else
-            # Computing nodes in lower precision failed to produce an alternating sequence of errors; try again in higher precision
-            ∇²f_pseudo = ∇f_pseudo'
+            # Computing nodes in lower precision failed to produce an alternating sequence of extrema; try again in higher precision
             x = chebroots(∇f)
-            fₓ = @. f(x)
             Sₓ = @. -floatsign(∇²f_pseudo(x))
         end
-    else
-        ∇²f_pseudo = ∇f_pseudo'
-        Sₓ = @. -floatsign(∇²f_pseudo(x))
     end
 
-    return x, fₓ, Sₓ
+    return x, Sₓ
 end
 
 function refine_roots!(∇fun::Fun, ∇²fun::Fun, x::AbstractVector{T}) where {T <: AbstractFloat}
     # Refine roots using Newton's method
-    isempty(x) && return x
+    isempty(x) && return T[], T[]
     Δx, ∇fₓ, ∇²fₓ, Sₓ = zero(x), zero(x), zero(x), zero(x)
     Δx_max = T(Inf)
     maxiter = ceil(Int, log2(-log2(eps(T)))) # relative error should be ~eps(Float64) to start, and Newton's method squares the error each iteration
@@ -947,7 +960,6 @@ function refine_roots!(∇fun::Fun, ∇²fun::Fun, x::AbstractVector{T}) where {
     end
     return x, Sₓ
 end
-refine_roots!(∇fun::Fun, x::AbstractVector{T}) where {T <: AbstractFloat} = refine_roots!(∇fun, ∇fun', x)
 
 function minimax_constant_polynomial(f::AbstractVector{T}, o::MinimaxOptions{T}) where {T <: AbstractFloat}
     lo, hi = chebrange(f)
@@ -988,6 +1000,10 @@ function conv(a::AbstractVector, b::AbstractVector, L::Int = length(a) + length(
     end
     return c
 end
+
+# Cache rFFT plans. Worthwhile since we are always using the same power-of-2 sized rFFTs
+const PLAN_RFFT_CACHE = Dict{Tuple{DataType, Int}, Plan}()
+get_plan_rfft(x::AbstractVector{T}) where {T <: AbstractFloat} = get!(() -> plan_rfft(x), PLAN_RFFT_CACHE, (T, length(x)))::Plan{T}
 
 # Dummy wrapper to ensure we don't hit generic fallbacks
 struct HermitianWrapper{T <: AbstractFloat, A <: AbstractMatrix{T}} <: AbstractMatrix{T}
@@ -1122,7 +1138,7 @@ end
 parity(fun::Fun; kwargs...) = parity(coefficients(fun); kwargs...)
 
 # Chop small coefficients from the end of a Chebyshev series
-function lazychopcoeffs(c::AbstractVector{T}; rtol::T = eps(T), atol::T = zero(T), parity = :generic) where {T <: AbstractFloat}
+function lazychopcoeffs(c::AbstractVector{T}; rtol::T = eps(T), atol::T = zero(T), parity::Symbol = :generic) where {T <: AbstractFloat}
     scale = vscale(c)
     l = length(c)
     while l > 1 && abs(c[l]) <= max(rtol * scale, atol)
@@ -1212,9 +1228,9 @@ function chebroots(c::AbstractVector{T}; atol = 100 * eps(T)) where {T <: Abstra
 end
 chebroots(f::Fun; kwargs...) = chebroots(coefficients(f); kwargs...)
 
-function recurse_chebroots(c::AbstractVector{T}, atol::T) where {T <: AbstractFloat}
+function recurse_chebroots(c₀::AbstractVector{T}, atol::T) where {T <: AbstractFloat}
     # Compute the real roots contained in [-1, 1] of a polynomial in the Chebyshev basis
-    c = lazychopcoeffs(c; rtol = eps(T))
+    c = lazychopcoeffs(c₀; rtol = eps(T))
     n = length(c)
 
     if n == 0
@@ -1227,12 +1243,12 @@ function recurse_chebroots(c::AbstractVector{T}, atol::T) where {T <: AbstractFl
 
     elseif n == 2
         # Linear function
-        r = -c[1] / c[2]
-        return abs(imag(r)) > atol || abs(real(r) > 1 + atol) ? T[] : T[clamp(real(r), -one(T), one(T))]
+        r₀ = -c[1] / c[2]
+        return abs(imag(r₀)) > atol || abs(real(r₀) > 1 + atol) ? T[] : T[clamp(real(r₀), -one(T), one(T))]
 
     elseif n <= 70
         # Polynomial degree is small enough; compute roots directly using the colleague matrix
-        r = prune_chebroots!(eigvals(colleague_matrix(c)), atol)
+        r = prune_chebroots!(eigvals(colleague_matrix(c)), atol)::Vector{T}
         return clamp.(r, -one(T), one(T))
 
     else
@@ -1245,9 +1261,9 @@ function recurse_chebroots(c::AbstractVector{T}, atol::T) where {T <: AbstractFl
         f2 = Fun(x -> f(muladd(a⁺, x, b⁺)), ChebSpace(T))
 
         # Recurse and map roots back to original interval
-        r1 = Threads.@spawn muladd.(a⁻, recurse_chebroots(coefficients(f1), 2 * atol), b⁻) # absolute tolerance on the stretched out half interval is double the absolute tolerance on the original interval
-        r2 = muladd.(a⁺, recurse_chebroots(coefficients(f2), 2 * atol), b⁺)
-        return [fetch(r1); r2]
+        r1 = Threads.@spawn muladd.(a⁻, recurse_chebroots(coefficients(f1), 2 * atol)::Vector{T}, b⁻) # absolute tolerance on the stretched out half interval is double the absolute tolerance on the original interval
+        r2 = muladd.(a⁺, recurse_chebroots(coefficients(f2), 2 * atol)::Vector{T}, b⁺)
+        return [fetch(r1)::Vector{T}; r2]
     end
 end
 
