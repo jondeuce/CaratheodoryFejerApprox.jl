@@ -52,6 +52,7 @@ using GenericLinearAlgebra: GenericLinearAlgebra # defines generic method for `L
 using LinearAlgebra: LinearAlgebra, Hermitian, cholesky!, cond, diag, dot, eigen, eigvals, ldiv!, mul!, qr!
 using Polynomials: Polynomials, ChebyshevT, Polynomial
 using PrecompileTools: PrecompileTools, @compile_workload
+using Roots: Roots
 using Setfield: Setfield, @set!
 using ToeplitzMatrices: ToeplitzMatrices, Toeplitz, Hankel
 
@@ -786,7 +787,7 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T
             @. q[2:n+1] += clamp(o.stepsize * δq, -o.stepclip, o.stepclip)
             ε += o.stepsize * δε
 
-            if isempty(chebroots(Q))
+            if isempty(chebroots(Q; no_pts = max(12, n + 1)))
                 # No poles in the denominator of the rational approximant
                 normalize_unitrational!(p, q)
                 @. Pₓ = P(x)
@@ -879,7 +880,7 @@ function minimax_nodes(f, ∇f_pseudo::Fun{<:Chebyshev, T}, nnodes::Int; atol::T
     @assert nnodes >= 2
 
     # Local extremal nodes. Note: Sₓ = +1 for local maxima, -1 for local minima, but it is *not* necessarily the sign of f(x)
-    x, Sₓ = local_minimax_nodes(∇f_pseudo)
+    x, Sₓ = local_extremal_nodes(∇f_pseudo; no_pts = max(12, nnodes + 1))
     fₓ = @. f(x)
     check_signs(Sₓ; quiet)
 
@@ -916,15 +917,18 @@ function minimax_nodes(f, ∇f_pseudo::Fun{<:Chebyshev, T}, nnodes::Int; atol::T
     return x, fₓ, Sₓ
 end
 
-function local_minimax_nodes(∇f_pseudo::Fun, ∇²f_pseudo::Fun = ∇f_pseudo')
+function local_extremal_nodes(∇f_pseudo::Fun{<:Chebyshev, T}; kwargs...) where {T <: AbstractFloat}
     # Compute local extrema of a function f(x).
     #   - ∇f_pseudo(x) need only be pointwise proportional to ∇f(x), i.e. ∇f_pseudo(x) = ∇f(x) * g(x), where g(x) != 0 ∀ x ∈ domain(f)
     #   - ∇²f_pseudo(x) = d/dx ∇f_pseudo(x), and Sₓ = +1 for local maxima, -1 for local minima
     ∇f = coefficients(∇f_pseudo)
-    T = eltype(∇f)
+    vscale(∇f) == zero(T) && return T[], T[] # zero function
+    ∇²f_pseudo = ∇f_pseudo'
 
     # Use at least 64-bit precision for initial node computation
-    x = convert(Vector{T}, chebroots(convert(Vector{Float64}, ∇f)))
+    ∇f64 = lazychopcoeffs(convert(Vector{Float64}, ∇f); rtol = eps(Float64))
+    ∇f64_pseudo = Fun(ChebSpace(Float64), ∇f64)
+    x = convert(Vector{T}, chebroots(∇f64_pseudo; kwargs...))
 
     # Compute sign of local extrema; +1 for local maxima, -1 for local minima
     Sₓ = @. -floatsign(∇²f_pseudo(x))
@@ -935,8 +939,25 @@ function local_minimax_nodes(∇f_pseudo::Fun, ∇²f_pseudo::Fun = ∇f_pseudo'
             x, Sₓ = refine_roots!(∇f_pseudo, ∇²f_pseudo, x)
         else
             # Computing nodes in lower precision failed to produce an alternating sequence of extrema; try again in higher precision
-            x = chebroots(∇f)
+            x = chebroots(∇f; kwargs...)
             Sₓ = @. -floatsign(∇²f_pseudo(x))
+        end
+    end
+    isempty(x) && return T[], T[] # no extrema found
+
+    # Cleanup: ensure roots are unique, sorted, and contained in [-1, 1]
+    @. x = clamp(x, -one(T), one(T))
+    if !issorted(x)
+        I = sortperm(x)
+        x, Sₓ = x[I], Sₓ[I]
+    end
+    i = 1
+    while i < length(x)
+        if x[i] == x[i+1]
+            deleteat!(x, i + 1)
+            deleteat!(Sₓ, i + 1)
+        else
+            i += 1
         end
     end
 
@@ -1206,18 +1227,29 @@ chebinfnorm(fun::Fun) = max(abs.(chebrange(fun))...)
 
 #### Rootfinding utilities
 
+function chebroots(c₀::AbstractVector{T}; kwargs...) where {T <: AbstractFloat}
+    # Using bisection on the interval [-1, 1] directly tends to be much faster than computing
+    # all of the eigenvalues of the colleague matrix, since in general a degree `d` degree polynomial
+    # has `d` complex roots but only `log(d)` real roots.
+    scale = vscale(c₀)
+    scale == zero(T) && return T[] # zero function
+    c = lazychopcoeffs(c₀ ./ scale; rtol = zero(T), atol = zero(T)) # normalize coefficients and prune exact zeros; we want scale-independent roots
+    return Roots.find_zeros(Fun(ChebSpace(T), c), (-one(T), one(T)); kwargs...)
+end
+chebroots(fun::Fun; kwargs...) = chebroots(coefficients(fun); kwargs...)
+
 # The below code is largely taken from ApproxFunOrthogonalPolynomials.jl, adjusted to work for generic types:
 #   https://github.com/JuliaApproximation/ApproxFunOrthogonalPolynomials.jl/blob/90d8cbe03adb2d95c50c165377d4f20a02d2d1e6/src/roots.jl#L82
 # TODO: Extend this code to work with complex coefficients and upstream to ApproxFunOrthogonalPolynomials.jl
 
-function chebroots(c::AbstractVector{T}; atol = 100 * eps(T)) where {T <: AbstractFloat}
+function colleague_chebroots(c::AbstractVector{T}; atol = 100 * eps(T)) where {T <: AbstractFloat}
     scale = vscale(c)
     scale == zero(T) && return T[] # zero function
     c = chopcoeffs(c; rtol = zero(T), atol = zero(T)) # prune exact zeros
     c ./= scale
 
     # Recursively compute roots on subintervals
-    r = recurse_chebroots(c, atol)
+    r = recurse_colleague_chebroots(c, atol)
 
     # Check endpoints, which are prone to inaccuracy
     f⁻, f⁺ = chebeval_at_endpoints(c)
@@ -1226,9 +1258,9 @@ function chebroots(c::AbstractVector{T}; atol = 100 * eps(T)) where {T <: Abstra
 
     return r
 end
-chebroots(f::Fun; kwargs...) = chebroots(coefficients(f); kwargs...)
+colleague_chebroots(f::Fun; kwargs...) = colleague_chebroots(coefficients(f); kwargs...)
 
-function recurse_chebroots(c₀::AbstractVector{T}, atol::T) where {T <: AbstractFloat}
+function recurse_colleague_chebroots(c₀::AbstractVector{T}, atol::T) where {T <: AbstractFloat}
     # Compute the real roots contained in [-1, 1] of a polynomial in the Chebyshev basis
     c = lazychopcoeffs(c₀; rtol = eps(T))
     n = length(c)
@@ -1248,8 +1280,9 @@ function recurse_chebroots(c₀::AbstractVector{T}, atol::T) where {T <: Abstrac
 
     elseif n <= 70
         # Polynomial degree is small enough; compute roots directly using the colleague matrix
-        r = prune_chebroots!(eigvals(colleague_matrix(c)), atol)::Vector{T}
-        return clamp.(r, -one(T), one(T))
+        rc = eigvals(colleague_matrix(c)) # all complex roots of the polynomial
+        rc = filter!(z -> abs(imag(z)) < atol && abs(real(z)) <= 1 + atol, rc) # keep roots that lie in [-1 - atol, 1 + atol] x [-atol, atol]
+        return clamp.(real.(rc), -one(T), one(T)) # return real part clamped to [-1, 1]
 
     else
         # Recursively subdivide the interval [-1,1] into [-1, x₀], [x₀, 1]
@@ -1261,15 +1294,10 @@ function recurse_chebroots(c₀::AbstractVector{T}, atol::T) where {T <: Abstrac
         f2 = Fun(x -> f(muladd(a⁺, x, b⁺)), ChebSpace(T))
 
         # Recurse and map roots back to original interval
-        r1 = Threads.@spawn muladd.(a⁻, recurse_chebroots(coefficients(f1), 2 * atol)::Vector{T}, b⁻) # absolute tolerance on the stretched out half interval is double the absolute tolerance on the original interval
-        r2 = muladd.(a⁺, recurse_chebroots(coefficients(f2), 2 * atol)::Vector{T}, b⁺)
+        r1 = Threads.@spawn muladd.(a⁻, recurse_colleague_chebroots(coefficients(f1), 2 * atol)::Vector{T}, b⁻) # absolute tolerance on the stretched out half interval is double the absolute tolerance on the original interval
+        r2 = muladd.(a⁺, recurse_colleague_chebroots(coefficients(f2), 2 * atol)::Vector{T}, b⁺)
         return [fetch(r1)::Vector{T}; r2]
     end
-end
-
-function prune_chebroots!(r::AbstractVector{C}, atol::T) where {T <: AbstractFloat, C <: Union{T, Complex{T}}}
-    r = filter!(z -> abs(imag(z)) < atol && abs(real(z)) <= 1 + atol, r) # keep roots that lie in [-1 - atol, 1 + atol] x [-atol, atol]
-    return clamp.(real.(r), -one(T), one(T)) # return real part clamped to [-1, 1]
 end
 
 function colleague_matrix(c::AbstractVector{T}) where {T <: Number}
