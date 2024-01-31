@@ -328,7 +328,7 @@ function rationalcf(c::AbstractVector{T}, m::Int, n::Int, o::CFOptions{T}) where
     # Compute numerator polynomial from Chebyshev expansion of 1/Q(x) and R̃(x)
     if n > 0
         # We know the exact ellipse of analyticity for 1/Q(x), so use this knowledge to obtain its Chebyshev coefficients:
-        ρ⁻¹ = inv(clamp(ρ, eps(T), 1 - eps(T)))
+        ρ⁻¹ = inv(clamp(ρ, eps(T)^(2 // 3), 1 - eps(T)^(2 // 3)))
         nq⁻¹ = ceil(Int, log(4 / eps(T) / (ρ⁻¹ - 1)) / log(ρ⁻¹))
         Q⁻¹ = Fun(x -> inv(Q(x)), ChebSpace(T), min(nq⁻¹, o.maxdegree))
         γ = zeropadresize!(coefficients(Q⁻¹), 2m + 1)
@@ -377,8 +377,9 @@ function normalized_symmetric_laurent_product(b::AbstractVector{T}; quiet::Bool 
     # and has zeros inside ∂D. Returns Chebyshev coefficients of Q(x) and the radius ρ of the zero-free annulus ρ < |z| < ρ⁻¹.
     z = polyroots(b)
     ρ = maximum(abs, z)
+    ρmax = 1 - eps(T)^(2 // 3)
 
-    if ρ < 1
+    if ρ < ρmax
         # Normal case; roots are all within the unit disk. Compute Chebyshev coefficients of Q(x) by expanding the product directly:
         #   Q̃(x) = q₁(z)q₁(z⁻¹) = (∑ᵢ₌₀ⁿ bᵢ zⁱ) (∑ⱼ₌₀ⁿ bⱼ z⁻ʲ) = ∑ᵢ,ⱼ₌₀ⁿ bᵢ bⱼ zⁱ⁻ʲ
         #        = ∑′ₖ₌₀ⁿ ∑ₗ₌ₖⁿ bₖ bₗ (zᵏ + z⁻ᵏ)    where ∑′ means k=0 term is halved
@@ -395,8 +396,8 @@ function normalized_symmetric_laurent_product(b::AbstractVector{T}; quiet::Bool 
     else
         # Degenerate case; roots are not all within the unit disk. As in chebfun, we filter out roots with |z| > 1
         # and then compute Q(x) using the renormalized q₁(z).
-        !quiet && @warn "Ill-conditioning detected. Results may be inaccurate"
-        filter!(zi -> abs(zi) < 1, z)
+        !quiet && @warn "Pole(s) detected in denominator of CF rational approximant; results may be inaccurate.\nTry lowering the denominator degree and/or increasing the numerator degree."
+        filter!(zi -> abs(zi) < ρmax, z)
         isempty(z) && return ones(T, 1), zero(T)
         ρ = maximum(abs, z)
         n = length(z)
@@ -807,7 +808,7 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T
                     break
                 end
             else
-                !o.quiet && @warn "Newton step created pole(s) in the denominator of the rational approximant; exiting early"
+                !o.quiet && @warn "Newton step created pole(s) in the denominator of the minimax rational approximant.\nTry lowering the denominator degree and/or increasing the numerator degree."
                 copy!.((p, q), (p₀, q₀))
                 return postprocess(p, q, ε, o)
             end
@@ -902,17 +903,26 @@ function minimax_nodes(f, ∇f_pseudo::Fun{<:Chebyshev, T}, nnodes::Int; atol::T
     end
     length(x) <= nnodes && return x, fₓ, Sₓ # out of points to add, so we're done
 
-    # Have too many points; choose the streak of `nnodes` nodes with the maximum signed sum of errors
-    ibest, errbest = 0, T(-Inf)
-    for i in 1:length(x)-nnodes+1
-        err = sum(@views Sₓ[i:i+nnodes-1] .* fₓ[i:i+nnodes-1]) # signed sum of errors rewards large errors with the correct sign
-        if err > errbest
-            ibest, errbest = i, err
+    # List of candidate nodes is too long; greedily remove nodes with small signed error until `nnodes` points (of alternating sign) remain
+    while (nx = length(x)) > nnodes
+        # Get lowest endpoint error
+        err⁻, err⁺ = Sₓ[1] * fₓ[1], Sₓ[end] * fₓ[end]
+        iend, errend = err⁻ <= err⁺ ? (1, err⁻) : (nx, err⁺)
+        if nx == nnodes + 1
+            # Can only remove one point; choose the endpoint with the smallest error
+            deleteat!.((x, fₓ, Sₓ), iend)
+        else
+            # Find pair of consecutive points with minimal signed error
+            errpair, ipair = findmin(Sₓ[i] * fₓ[i] + Sₓ[i+1] * fₓ[i+1] for i in 1:nx-1)
+            if errpair <= errend
+                # Remove the pair of points with the smallest error
+                deleteat!.((x, fₓ, Sₓ), (ipair:ipair+1,))
+            else
+                # Remove the endpoint with the smallest error
+                deleteat!.((x, fₓ, Sₓ), iend)
+            end
         end
     end
-    x = x[ibest:ibest+nnodes-1]
-    fₓ = fₓ[ibest:ibest+nnodes-1]
-    Sₓ = Sₓ[ibest:ibest+nnodes-1]
 
     return x, fₓ, Sₓ
 end
@@ -1324,8 +1334,7 @@ function precompile()
     # and TTFX is not dominated by precompilation time for BigFloat anyway.
     for T in [Float32, Float64, Double64]
         # Oscillatory function with many zeros and relatively long Chebyshev series
-        fun = ChebFun(T, x -> exp(-4x^2) * (1 + 2 * sinpi(10x)))
-        @assert length(chebroots(fun)) == 20
+        chebroots(ChebFun(T, x -> exp(-4x^2) * (1 + 2 * sinpi(10x))))
     end
     for T in [Float32, Float64, Double64], f in [exp, cospi, sinpi], dom in [(-1.0f0, 1.0f0), (-0.97f0, 1.32f0)], (m, n) in [(2, 0), (3, 0), (2, 3), (3, 2)]
         # Minimax with generic, even, and odd functions with relatively short Chebyshev series.

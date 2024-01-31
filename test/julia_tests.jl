@@ -27,3 +27,26 @@ end
     finf = chebinfnorm(fun)
     @test max(abs(lo), abs(hi)) <= finf + δ
 end
+
+@testset "exact polynomialcf ($T): dom = $dom" for T in [Float32, Float64, Double64, BigFloat], dom in [(-1.0, 1.0), (-0.97, 1.32)]
+    for m in 0:5
+        p = rand_polycoeffs(T, m; type = :mono, annulus = (0.0, 2.0))
+        Δm = rand(0:2)
+        fun = ChebFun(T, x -> evalpoly(x, p), dom)
+        p′, _ = monocoeffs(polynomialcf(fun, m + Δm))
+        @test p′[1:m+1] ≈ p
+    end
+end
+
+@testset "exact rationalcf ($T): dom = $dom" for T in [Float32, Float64, Double64, BigFloat], dom in [(-1.0, 1.0), (-0.97, 1.32)]
+    for m in 2:3, n in 2:3
+        p = rand_polycoeffs(T, m; type = :mono, annulus = (0.0, 2.0))
+        q = rand_polycoeffs(T, n; type = :mono, annulus = (2.0, 3.0))
+        p, q = normalize_rational(p, q)
+        Δm, Δn = rand(0:2), rand(0:2)
+        fun = ChebFun(T, x -> evalrat(x, p, q), dom)
+        p′, q′ = monocoeffs(rationalcf(fun, m + Δm, n + Δn))
+        @test isapprox(p′[1:m+1], p; rtol = T === Float32 ? 0.01f0 : √(eps(T))) # Float32 seems to be much less accurate
+        @test isapprox(q′[1:n+1], q; rtol = T === Float32 ? 0.01f0 : √(eps(T)))
+    end
+end

@@ -1,8 +1,9 @@
 using CaratheodoryFejerApprox
 
 using ApproxFun: Chebyshev, Fun, Interval
-using CaratheodoryFejerApprox: ChebFun, chebrange, chebroots, chebinfnorm, lazychopcoeffs, parity, normalize_rational
+using CaratheodoryFejerApprox: ChebFun, chebcoeffs, chebrange, chebroots, chebinfnorm, evalrat, lazychopcoeffs, monocoeffs, normalize_rational, parity
 using DoubleFloats: Double64
+using Polynomials: Polynomials
 using Statistics: mean
 
 runge(x) = 1 / (1 + 25x^2)
@@ -46,4 +47,18 @@ function rand_chebfun(dom::NTuple{2, T} = (-1.0, 1.0); kwargs...) where {T <: Ab
     # Chebfun with random exponentially decaying coefficients such that |c[n]| ~ eps(T)
     c = rand_chebcoeffs(T; kwargs...)
     return ChebFun(c, dom)
+end
+
+function rand_polycoeffs(::Type{T}, deg::Int; type = :cheb, annulus = (0, 2)) where {T <: AbstractFloat}
+    deg <= 0 && return randn(T, 1)
+    # Random polynomial roots contained in `annulus[1] < |z| < annulus[2]`
+    z = randn(Complex{T}, deg ÷ 2)
+    ρ = rand_uniform(T.(annulus)..., deg ÷ 2)
+    z .*= ρ ./ abs.(z)
+    z = [z; conj(z)]
+    isodd(deg) && pushfirst!(z, rand_uniform(T.(annulus)...))
+    # Convert to coefficients and randomly scale
+    P = type === :cheb ? Polynomials.ChebyshevT : Polynomials.Polynomial
+    c = real(Polynomials.coeffs(Polynomials.fromroots(P, z)))::Vector{T}
+    return randn(T) * c
 end
