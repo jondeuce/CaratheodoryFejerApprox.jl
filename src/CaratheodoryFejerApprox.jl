@@ -102,7 +102,7 @@ function Base.show(io::IO, rat::RationalApproximant{T}) where {T <: AbstractFloa
     println(io, "RationalApproximant{", T, "}")
     println(io, "  Type:   m / n = ", m, " / ", n)
     println(io, "  Domain: ", rnd(dom[1]), " ≤ x ≤ ", rnd(dom[2]))
-    println(io, "  Error:  |f(x) - ", (n == 0 ? "p(x)" : "p(x) / q(x)"), "| ⪅ ", rnd(err))
+    println(io, "  Error:  |f - ", (n == 0 ? "p" : "p / q"), "| ⪅ ", rnd(err))
     println(io, "  Approximant:")
     print(io, "      p(", var, ") = ", num)
     n > 0 && print(io, "\n      q(", var, ") = ", den)
@@ -497,14 +497,7 @@ end
 
 function postprocess(p::AbstractVector{T}, λ::T, o::CFOptions{T}) where {T <: AbstractFloat}
     # Chop trailing zero coefficients to match parity
-    p = paritychop(p, o.parity)
-
-    # Clean up even/odd symmetric coefficients
-    if o.parity === :even
-        @views p[2:2:end] .= zero(T)
-    elseif o.parity === :odd
-        @views p[1:2:end] .= zero(T)
-    end
+    p = paritycleanup(p, o.parity)
 
     # Rescale the outputs
     p .*= o.vscale
@@ -515,20 +508,7 @@ end
 
 function postprocess(p::AbstractVector{T}, q::AbstractVector{T}, λ::T, o::CFOptions{T}) where {T <: AbstractFloat}
     # Chop trailing zero coefficients to match parity
-    if o.parity === :even
-        p, q = paritychop(p, :even), paritychop(q, :even)
-    elseif o.parity === :odd
-        p, q = paritychop(p, :odd), paritychop(q, :even)
-    end
-
-    # Clean up even/odd symmetric coefficients
-    if o.parity === :even
-        @views p[2:2:end] .= zero(T) # even
-        @views q[2:2:end] .= zero(T) # even
-    elseif o.parity === :odd
-        @views p[1:2:end] .= zero(T) # odd
-        @views q[2:2:end] .= zero(T) # even
-    end
+    p, q = paritycleanup(p, q, o.parity)
 
     # Normalize the coefficients
     normalize_chebrational!(p, q)
@@ -998,8 +978,8 @@ function minimax_constant_polynomial(f::AbstractVector{T}, o::MinimaxOptions{T})
     return postprocess(p, ε, o)
 end
 
-postprocess(p::AbstractVector{T}, ε::T, o::MinimaxOptions{T}) where {T <: AbstractFloat} = PolynomialApproximant(p, o.dom, ε)
-postprocess(p::AbstractVector{T}, q::AbstractVector{T}, ε::T, o::MinimaxOptions{T}) where {T <: AbstractFloat} = RationalApproximant(normalize_chebrational!(p, q)..., o.dom, ε)
+postprocess(p::AbstractVector{T}, ε::T, o::MinimaxOptions{T}) where {T <: AbstractFloat} = PolynomialApproximant(paritycleanup(p, o.parity), o.dom, ε)
+postprocess(p::AbstractVector{T}, q::AbstractVector{T}, ε::T, o::MinimaxOptions{T}) where {T <: AbstractFloat} = RationalApproximant(normalize_chebrational!(paritycleanup(p, q, o.parity)...)..., o.dom, ε)
 
 function check_signs(S; quiet = false)
     pass = all(S[i] == -S[i+1] for i in 1:length(S)-1)
