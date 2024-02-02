@@ -68,16 +68,16 @@ struct RationalApproximant{T <: AbstractFloat}
 end
 PolynomialApproximant(p::AbstractVector{T}, dom::NTuple{2, T}, err::T) where {T <: AbstractFloat} = RationalApproximant(p, ones(T, 1), dom, err)
 
-function (res::RationalApproximant{T})(x) where {T <: AbstractFloat}
-    x = T(x)
-    pₓ = ChebFun(T, res.p, res.dom)(x)
+function (res::RationalApproximant{T})(x::T) where {T <: AbstractFloat}
     if length(res.q) <= 1
-        return pₓ
+        return ChebFun(T, res.p, res.dom)(x)
     else
+        pₓ = ChebFun(T, res.p, res.dom)(x)
         qₓ = ChebFun(T, res.q, res.dom)(x)
         return pₓ / qₓ
     end
 end
+(res::RationalApproximant{T})(x) where {T <: AbstractFloat} = res(T(x))
 
 Base.Tuple(rat::RationalApproximant) = (rat.p, rat.q, rat.dom, rat.err)
 Base.NamedTuple(rat::RationalApproximant) = (; rat.p, rat.q, rat.dom, rat.err)
@@ -104,9 +104,9 @@ function Base.show(io::IO, rat::RationalApproximant{T}) where {T <: AbstractFloa
     println(io, "  Domain: ", rnd(dom[1]), " ≤ x ≤ ", rnd(dom[2]))
     println(io, "  Error:  |f(x) - ", (n == 0 ? "p(x)" : "p(x) / q(x)"), "| ⪅ ", rnd(err))
     println(io, "  Approximant:")
-    print("      p(", var, ") = ", num)
-    n > 0 && print("\n      q(", var, ") = ", den)
-    !is_unit && print("\n  where: t = (x - ", μ, ") / ", σ)
+    print(io, "      p(", var, ") = ", num)
+    n > 0 && print(io, "\n      q(", var, ") = ", den)
+    !is_unit && print(io, "\n  where: t = (x - ", μ, ") / ", σ)
     return nothing
 end
 
