@@ -1,7 +1,7 @@
 name = "CaratheodoryFejerApprox"
 uuid = "591793e0-8db6-4f40-aac6-a66fe5f65964"
 authors = ["Jonathan Doucette <jdoucette@physics.ubc.ca> and contributors"]
-version = "0.0.1"
+version = "0.1"
 
 [deps]
 AbstractFFTs = "621f4979-c628-5d54-868e-fcf4e3e8185c"

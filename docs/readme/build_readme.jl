@@ -5,6 +5,7 @@ Pkg.activate(@__DIR__)
 Pkg.develop(; path = base_dir)
 # Pkg.update()
 
+using CaratheodoryFejerApprox
 using Literate
 
 function replify(content)
@@ -22,7 +23,7 @@ function replify(content)
     # Find blocks whose first line ends with "#repl-block-start" and last line ends with "#repl-block-end" and make an indented repl block
     Istart = findall(endswith("#repl-block-start"), lines)
     Iend = findall(endswith("#repl-block-end"), lines)
-    @assert length(Istart) == length(Iend) "Mismatched repl-blocks"
+    @assert length(Istart) == length(Iend) && all(Istart .< Iend) "Mismatched repl-blocks"
 
     for (istart, iend) in zip(Istart, Iend)
         lines[istart] = "julia> " * split(lines[istart], "#repl-block-start")[1]

@@ -1,9 +1,9 @@
 # # CaratheodoryFejerApprox.jl
 
-# [![Stable](https://img.shields.io/badge/docs-stable-blue.svg)](https://jondeuce.github.io/CaratheodoryFejerApprox.jl/stable/)
-# [![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://jondeuce.github.io/CaratheodoryFejerApprox.jl/dev/)
-# [![Build Status](https://github.com/jondeuce/CaratheodoryFejerApprox.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/jondeuce/CaratheodoryFejerApprox.jl/actions/workflows/CI.yml?query=branch%3Amain)
-# [![Coverage](https://codecov.io/gh/jondeuce/CaratheodoryFejerApprox.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/jondeuce/CaratheodoryFejerApprox.jl)
+# <!-- [![Stable](https://img.shields.io/badge/docs-stable-blue.svg)](https://jondeuce.github.io/CaratheodoryFejerApprox.jl/stable/) -->
+# <!-- [![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://jondeuce.github.io/CaratheodoryFejerApprox.jl/dev/) -->
+# [![Build Status](https://github.com/jondeuce/CaratheodoryFejerApprox.jl/actions/workflows/CI.yml/badge.svg?branch=master)](https://github.com/jondeuce/CaratheodoryFejerApprox.jl/actions/workflows/CI.yml?query=branch%3Amaster)
+# [![Coverage](https://codecov.io/gh/jondeuce/CaratheodoryFejerApprox.jl/branch/master/graph/badge.svg)](https://codecov.io/gh/jondeuce/CaratheodoryFejerApprox.jl)
 
 # ## Introduction
 
@@ -53,14 +53,14 @@ Extract polynomial coefficients in the monomial basis via `monocoeffs(res)` or i
 
 When `transplant = true` (the default), the monomial coefficients correspond to the original function `f(x)` on the interval `dom`. If `transplant = false`, they correspond to the linearly transplanted function `g(t) = f((x - mid) / rad)` where `mid` and `rad` are the midpoint and radius of `dom` and `-1 <= t <= 1`.
 
-Note that, particularly when `|mid|` is large, it can be much more numerically stable to evaluate the approximant via `evalpoly(t, p)` where `p` are the non-transplanted coefficients and `t = (x - mid) / rad`.
+Note that, particularly when `|mid|` is large, it can be much more numerically stable to evaluate the approximant via `evalpoly(t, p)` using the non-transplanted coefficients `p` and `t = (x - mid) / rad`.
 
 The Chebyshev coefficients always correspond to the linearly transplanted function `g(t) = f((x - mid) / rad)` used internally; they are not transplanted to `dom`.
 =#
 
 # ## Usage
 
-using CaratheodoryFejerApprox #hide
+using CaratheodoryFejerApprox #repl
 
 # ### Polynomial approximant
 
