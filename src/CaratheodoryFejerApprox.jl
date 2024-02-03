@@ -39,12 +39,16 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 =#
 
+"""
+$(README)
+"""
 module CaratheodoryFejerApprox
 
 using AbstractFFTs: AbstractFFTs, Plan, irfft, plan_rfft, rfft
 using ApproxFun: ApproxFun, Chebyshev, ChebyshevInterval, ClosedInterval, Fun, Interval, coefficients, domain, endpoints, extrapolate, ncoefficients, space
 using ArnoldiMethod: ArnoldiMethod, partialschur
 using Arpack: Arpack, eigs
+using DocStringExtensions: DocStringExtensions, README
 using DoubleFloats: DoubleFloats, Double64
 using FFTW: FFTW # defines fast FFTs for real/complex Float32/Floa64
 using GenericFFT: GenericFFT # defines generic methods for FFTs
@@ -67,7 +71,8 @@ polynomialcf(f, m::Int) -> RationalApproximant{Float64}
 polynomialcf(f, dom::NTuple{2, T}, m::Int) -> RationalApproximant{T}
 ```
 
-Approximate a function `f` with a degree `m` polynomial CF approximant on the interval `dom`. If not specified, `dom` defaults to `(-1.0, 1.0)`.
+Approximate a function `f` with a degree `m` polynomial CF approximant on the interval `dom`.
+If not specified, `dom` defaults to `(-1.0, 1.0)`.
 """
 function polynomialcf end
 
@@ -77,7 +82,8 @@ rationalcf(f, m::Int, n::Int) -> RationalApproximant{Float64}
 rationalcf(f, dom::NTuple{2, T}, m::Int, n::Int) -> RationalApproximant{T}
 ```
 
-Approximate a function `f` with a type `(m, n)` rational CF approximant on the interval `dom`, where `m` is the numerator degree and `n` is the denominator degree. If not specified, `dom` defaults to `(-1.0, 1.0)`.
+Approximate a function `f` with a type `(m, n)` rational CF approximant on the interval `dom`, where `m` is the numerator degree and `n` is the denominator degree.
+If not specified, `dom` defaults to `(-1.0, 1.0)`.
 """
 function rationalcf end
 
@@ -87,7 +93,8 @@ minimax(f, m::Int, n::Int) -> RationalApproximant{Float64}
 minimax(f, dom::NTuple{2, T}, m::Int, n::Int) -> RationalApproximant{T}
 ```
 
-Compute the type `(m, n)` CF approximant and then, if necessary, fine-tune the approximant to become a true minimax approximant using the [Remez algorithm](https://en.wikipedia.org/wiki/Remez_algorithm). If not specified, `dom` defaults to `(-1.0, 1.0)`.
+Compute the type `(m, n)` CF approximant and then, if necessary, fine-tune the approximant to become a true minimax approximant using the [Remez algorithm](https://en.wikipedia.org/wiki/Remez_algorithm).
+If not specified, `dom` defaults to `(-1.0, 1.0)`.
 """
 function minimax end
 
@@ -124,10 +131,10 @@ function chebcoeffs end
 struct RationalApproximant{T <: AbstractFloat}
 ```
 
-A simple wrapper type representing a rational approximant on an interval.
+A simple wrapper type returned by `polynomialcf`, `rationalcf`, and `minimax` representing a rational approximant on an interval.
 Numerator and denominator coefficients are stored in the Chebyshev basis.
-Coefficients can be extracted in the Chebyshev basis using `chebcoeffs` or in the monomial basis using `monocoeffs`.
-For convenience the approximant is also callable, evaluating the rational approximant `p(x) / q(x)` given `x`.
+Coefficients can be extracted from `res::RationalApproximant` in the Chebyshev basis via `chebcoeffs(res)` or in the monomial basis via `monocoeffs(res)`.
+For convenience, the approximant is also callable: `res(x)` evaluates the rational approximant `p(x) / q(x)` at `x`.
 """
 struct RationalApproximant{T <: AbstractFloat}
     p::Vector{T}

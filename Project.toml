@@ -1,13 +1,14 @@
 name = "CaratheodoryFejerApprox"
 uuid = "591793e0-8db6-4f40-aac6-a66fe5f65964"
 authors = ["Jonathan Doucette <jdoucette@physics.ubc.ca> and contributors"]
-version = "0.1"
+version = "0.1.1-DEV"
 
 [deps]
 AbstractFFTs = "621f4979-c628-5d54-868e-fcf4e3e8185c"
 ApproxFun = "28f2ccd6-bb30-5033-b560-165f7b14dc2f"
 ArnoldiMethod = "ec485272-7323-5ecc-a04f-4719b315124d"
 Arpack = "7d9fca2a-8960-54d3-9f78-7d1dccf2cb97"
+DocStringExtensions = "ffbed154-4ef7-542d-bbb7-c09d3a79fcae"
 DoubleFloats = "497a8b3b-efae-58df-a0af-a86822472b78"
 FFTW = "7a1cc6ca-52ef-59f5-83cd-3a7055c09341"
 GenericFFT = "a8297547-1b15-4a5a-a998-a2ac5f1cef28"
@@ -25,6 +26,7 @@ ApproxFun = "0.13"
 Aqua = "0.8"
 ArnoldiMethod = "0.2"
 Arpack = "0.5"
+DocStringExtensions = "0.9"
 DoubleFloats = "1.3"
 FFTW = "1.7"
 GenericFFT = "0.1"

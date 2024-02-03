@@ -3,7 +3,7 @@
 *.jl.mem
 /Manifest.toml
 /docs/Manifest.toml
-/docs/readme/Manifest.toml
+/docs/src/readme/Manifest.toml
 /docs/build/
 /benchmark/Manifest.toml
 /benchmark/*.json

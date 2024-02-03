@@ -1,9 +1,9 @@
 # # CaratheodoryFejerApprox.jl
 
-# <!-- [![Stable](https://img.shields.io/badge/docs-stable-blue.svg)](https://jondeuce.github.io/CaratheodoryFejerApprox.jl/stable/) -->
-# <!-- [![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://jondeuce.github.io/CaratheodoryFejerApprox.jl/dev/) -->
+# [![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://jondeuce.github.io/CaratheodoryFejerApprox.jl/dev/)
 # [![Build Status](https://github.com/jondeuce/CaratheodoryFejerApprox.jl/actions/workflows/CI.yml/badge.svg?branch=master)](https://github.com/jondeuce/CaratheodoryFejerApprox.jl/actions/workflows/CI.yml?query=branch%3Amaster)
 # [![Coverage](https://codecov.io/gh/jondeuce/CaratheodoryFejerApprox.jl/branch/master/graph/badge.svg)](https://codecov.io/gh/jondeuce/CaratheodoryFejerApprox.jl)
+# [![Aqua QA](https://raw.githubusercontent.com/JuliaTesting/Aqua.jl/master/badge.svg)](https://github.com/JuliaTesting/Aqua.jl)
 
 # ## Introduction
 

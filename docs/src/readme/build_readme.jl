@@ -1,5 +1,5 @@
 using Pkg
-base_dir = realpath(joinpath(@__DIR__, "../.."))
+base_dir = realpath(joinpath(@__DIR__, "../../.."))
 
 Pkg.activate(@__DIR__)
 Pkg.develop(; path = base_dir)
@@ -20,11 +20,12 @@ function replify(content)
         end
     end
 
-    # Find blocks whose first line ends with "#repl-block-start" and last line ends with "#repl-block-end" and make an indented repl block
+    # Find blocks whose first line ends with "#repl-block-start" and last line ends with "#repl-block-end"
     Istart = findall(endswith("#repl-block-start"), lines)
     Iend = findall(endswith("#repl-block-end"), lines)
     @assert length(Istart) == length(Iend) && all(Istart .< Iend) "Mismatched repl-blocks"
 
+    # For each block, add "julia> " to the beginning of the first line and indent the rest
     for (istart, iend) in zip(Istart, Iend)
         lines[istart] = "julia> " * split(lines[istart], "#repl-block-start")[1]
         for i in (istart+1):iend
