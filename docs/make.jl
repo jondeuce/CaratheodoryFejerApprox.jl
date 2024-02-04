@@ -6,7 +6,7 @@ DocMeta.setdocmeta!(CaratheodoryFejerApprox, :DocTestSetup, :(using Caratheodory
 makedocs(;
     modules = [CaratheodoryFejerApprox],
     authors = "Jonathan Doucette <jdoucette@physics.ubc.ca> and contributors",
-    repo = "https://github.com/jondeuce/CaratheodoryFejerApprox.jl/blob/{commit}{path}#{line}",
+    repo = Documenter.Remotes.GitHub("jondeuce", "CaratheodoryFejerApprox.jl"),
     sitename = "CaratheodoryFejerApprox.jl",
     format = Documenter.HTML(;
         prettyurls = get(ENV, "CI", "false") == "true",

@@ -66,10 +66,8 @@ export minimax, polynomialcf, rationalcf
 export chebcoeffs, monocoeffs
 
 """
-```julia
-polynomialcf(f, m::Int) -> RationalApproximant{Float64}
-polynomialcf(f, dom::NTuple{2, T}, m::Int) -> RationalApproximant{T}
-```
+    polynomialcf(f, m::Int) -> RationalApproximant{Float64}
+    polynomialcf(f, dom::NTuple{2, T}, m::Int) -> RationalApproximant{T}
 
 Approximate a function `f` with a degree `m` polynomial CF approximant on the interval `dom`.
 If not specified, `dom` defaults to `(-1.0, 1.0)`.
@@ -77,10 +75,8 @@ If not specified, `dom` defaults to `(-1.0, 1.0)`.
 function polynomialcf end
 
 """
-```julia
-rationalcf(f, m::Int, n::Int) -> RationalApproximant{Float64}
-rationalcf(f, dom::NTuple{2, T}, m::Int, n::Int) -> RationalApproximant{T}
-```
+    rationalcf(f, m::Int, n::Int) -> RationalApproximant{Float64}
+    rationalcf(f, dom::NTuple{2, T}, m::Int, n::Int) -> RationalApproximant{T}
 
 Approximate a function `f` with a type `(m, n)` rational CF approximant on the interval `dom`, where `m` is the numerator degree and `n` is the denominator degree.
 If not specified, `dom` defaults to `(-1.0, 1.0)`.
@@ -88,10 +84,8 @@ If not specified, `dom` defaults to `(-1.0, 1.0)`.
 function rationalcf end
 
 """
-```julia
-minimax(f, m::Int, n::Int) -> RationalApproximant{Float64}
-minimax(f, dom::NTuple{2, T}, m::Int, n::Int) -> RationalApproximant{T}
-```
+    minimax(f, m::Int, n::Int) -> RationalApproximant{Float64}
+    minimax(f, dom::NTuple{2, T}, m::Int, n::Int) -> RationalApproximant{T}
 
 Compute the type `(m, n)` CF approximant and then, if necessary, fine-tune the approximant to become a true minimax approximant using the [Remez algorithm](https://en.wikipedia.org/wiki/Remez_algorithm).
 If not specified, `dom` defaults to `(-1.0, 1.0)`.
@@ -99,10 +93,8 @@ If not specified, `dom` defaults to `(-1.0, 1.0)`.
 function minimax end
 
 """
-```julia
-monocoeffs(res::RationalApproximant{T}; transplant = true) -> NTuple{2, Vector{T}}
-monocoeffs(res::RationalApproximant{T1}, ::Type{T2} = BigFloat; transplant = true) -> NTuple{2, Vector{T1}}
-```
+    monocoeffs(res::RationalApproximant{T}; transplant = true) -> NTuple{2, Vector{T}}
+    monocoeffs(res::RationalApproximant{T1}; ::Type{T2} = BigFloat, transplant = true) -> NTuple{2, Vector{T1}}
 
 Extract polynomial coefficients of a `RationalApproximant` in the monomial basis.
 
@@ -116,9 +108,7 @@ Note that, particularly when `|mid|` is large, it can be much more numerically s
 function monocoeffs end
 
 """
-```julia
-chebcoeffs(res::RationalApproximant{T}) -> NTuple{2, Vector{T}}
-```
+    chebcoeffs(res::RationalApproximant{T}) -> NTuple{2, Vector{T}}
 
 Extract polynomial coefficients of a `RationalApproximant` in the Chebyshev basis.
 
@@ -127,9 +117,7 @@ The Chebyshev coefficients always correspond to the linearly transplanted functi
 function chebcoeffs end
 
 """
-```julia
-struct RationalApproximant{T <: AbstractFloat}
-```
+    struct RationalApproximant{T <: AbstractFloat}
 
 A simple wrapper type returned by `polynomialcf`, `rationalcf`, and `minimax` representing a rational approximant on an interval.
 Numerator and denominator coefficients are stored in the Chebyshev basis.
@@ -1423,6 +1411,7 @@ function precompile()
         minimax(f, T.(dom), m, n)
     end
     empty!(PLAN_RFFT_CACHE) # don't store rFFT plans in precompile cache
+    return nothing
 end
 
 @compile_workload begin
