@@ -3,7 +3,7 @@ base_dir = realpath(joinpath(@__DIR__, "../../.."))
 
 Pkg.activate(@__DIR__)
 Pkg.develop(; path = base_dir)
-# Pkg.update()
+Pkg.update()
 
 using CaratheodoryFejerApprox
 using Literate
