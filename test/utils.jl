@@ -1,6 +1,6 @@
 using CaratheodoryFejerApprox
 
-using ApproxFun: Chebyshev, Fun, Interval
+using ApproxFun: Chebyshev, Fun
 using CaratheodoryFejerApprox: ChebFun, chebcoeffs, chebrange, chebroots, chebinfnorm, evalrat, lazychopcoeffs, monocoeffs, normalize_rational, parity
 using DoubleFloats: Double64
 using Polynomials: Polynomials

@@ -1147,9 +1147,10 @@ zeropadresize!(x::AbstractVector, n::Int) = resize!(zeropad!(x, n), n)
 zeropadresize(x::AbstractVector, n::Int) = zeropadresize!(x[1:min(end, n)], n)
 
 function splitkwargs(kwargs, set1, set2)
-    kws1 = intersect(keys(kwargs), set1) # keyword arguments in set1
-    kws2 = setdiff(keys(kwargs), setdiff(set1, set2)) # filter out keyword arguments exclusive to set2
-    return kwargs[kws1], kwargs[kws2]
+    kwkeys = keys(kwargs)
+    kwkeys1 = union(intersect(kwkeys, set1), setdiff(kwkeys, set2)) # set1 keys + unknown
+    kwkeys2 = intersect(kwkeys, set2) # set2 keys only
+    return kwargs[kwkeys1], kwargs[kwkeys2]
 end
 
 @inline floatsign(x::T) where {T <: AbstractFloat} = ifelse(x < zero(T), -one(T), one(T))
@@ -1272,7 +1273,7 @@ function chebeval_at_midpoint(c::AbstractVector{T}) where {T <: AbstractFloat}
     # Compute f(0) for a Chebyshev series f(x) = ∑ₖ cₖ Tₖ(x).
     f₀ = zero(T)
     c′ = @views c[1:2:end] # even coefficients
-    for k in length(c′)-1:-1:0
+    @inbounds for k in length(c′)-1:-1:0
         c₂ₖ = c′[k+1]
         f₀ += ifelse(iseven(k), c₂ₖ, -c₂ₖ) # Tₖ(0) = {+1 if k ≡ 0 (mod 4), -1 if k ≡ 2 (mod 4)}
     end
@@ -1283,7 +1284,7 @@ chebeval_at_midpoint(f::Fun) = chebeval_at_midpoint(coefficients(f))
 function chebeval_at_endpoints(c::AbstractVector{T}) where {T <: AbstractFloat}
     # Compute f(-1) and f(+1) for a Chebyshev series f(x) = ∑ₖ cₖ Tₖ(x).
     f⁻ = f⁺ = zero(T)
-    for k in length(c)-1:-1:0
+    @inbounds for k in length(c)-1:-1:0
         cₖ = c[k+1]
         f⁻ += ifelse(iseven(k), cₖ, -cₖ) # Tₖ(-1) = {+1 if k ≡ 0 (mod 2), -1 if k ≡ 2 (mod 2)}
         f⁺ += cₖ # Tₖ(+1) = +1
@@ -1313,7 +1314,8 @@ function chebroots(c₀::AbstractVector{T}; kwargs...) where {T <: AbstractFloat
     scale = vscale(c₀)
     scale == zero(T) && return T[] # zero function
     c = lazychopcoeffs(c₀ ./ scale; rtol = zero(T), atol = zero(T)) # normalize coefficients and prune exact zeros; we want scale-independent roots
-    return Roots.find_zeros(Fun(ChebSpace(T), c), (-one(T), one(T)); kwargs...)
+    fun = Fun(ChebSpace(T), c)
+    return colleague_chebroots(fun; kwargs...)
 end
 chebroots(fun::Fun; kwargs...) = chebroots(coefficients(fun); kwargs...)
 
@@ -1332,8 +1334,8 @@ function colleague_chebroots(c::AbstractVector{T}; atol = 100 * eps(T)) where {T
 
     # Check endpoints, which are prone to inaccuracy
     f⁻, f⁺ = chebeval_at_endpoints(c)
-    (isempty(r) || !isapprox(last(r), one(T); atol = atol)) && (abs(f⁺) < atol) && push!(r, one(T))
-    (isempty(r) || !isapprox(first(r), -one(T); atol = atol)) && (abs(f⁻) < atol) && pushfirst!(r, -one(T))
+    (isempty(r) || !isapprox(last(r), one(T); atol)) && (abs(f⁺) < atol) && push!(r, one(T))
+    (isempty(r) || !isapprox(first(r), -one(T); atol)) && (abs(f⁻) < atol) && pushfirst!(r, -one(T))
 
     return r
 end
