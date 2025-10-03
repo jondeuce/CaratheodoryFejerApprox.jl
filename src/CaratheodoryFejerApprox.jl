@@ -1307,7 +1307,7 @@ chebinfnorm(fun::Fun) = max(abs.(chebrange(fun))...)
 
 #### Rootfinding utilities
 
-function chebroots(c₀::AbstractVector{T}; kwargs...) where {T <: AbstractFloat}
+function chebroots(c₀::AbstractVector{T}; polish::Bool = true, atol = 100 * eps(T)) where {T <: AbstractFloat}
     # Using bisection on the interval [-1, 1] directly tends to be much faster than computing
     # all of the eigenvalues of the colleague matrix, since in general a degree `d` degree polynomial
     # has `d` complex roots but only `log(d)` real roots.
@@ -1315,9 +1315,25 @@ function chebroots(c₀::AbstractVector{T}; kwargs...) where {T <: AbstractFloat
     scale == zero(T) && return T[] # zero function
     c = lazychopcoeffs(c₀ ./ scale; rtol = zero(T), atol = zero(T)) # normalize coefficients and prune exact zeros; we want scale-independent roots
     fun = Fun(ChebSpace(T), c)
-    return colleague_chebroots(fun; kwargs...)
+    r = colleague_chebroots(fun; atol)
+    polish && polish_chebroots!(fun, r)
+    return r
 end
 chebroots(fun::Fun; kwargs...) = chebroots(coefficients(fun); kwargs...)
+
+function polish_chebroots!(fun::Fun, r::AbstractVector{T}) where {T <: AbstractFloat}
+    # Polish roots using one step of Newton's method
+    isempty(r) && return r
+    y = fun.(r)
+    dy = (fun').(r)
+    @inbounds for i in eachindex(r)
+        yᵢ, dyᵢ = y[i], dy[i]
+        if isfinite(dyᵢ) && dyᵢ != 0
+            r[i] = clamp(r[i] - yᵢ / dyᵢ, -one(T), one(T))
+        end
+    end
+    return r
+end
 
 # The below code is largely taken from ApproxFunOrthogonalPolynomials.jl, adjusted to work for generic types:
 #   https://github.com/JuliaApproximation/ApproxFunOrthogonalPolynomials.jl/blob/90d8cbe03adb2d95c50c165377d4f20a02d2d1e6/src/roots.jl#L82
