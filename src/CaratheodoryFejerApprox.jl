@@ -832,7 +832,7 @@ function minimax(f::AbstractVector{T}, p::AbstractVector{T}, q::AbstractVector{T
             @. q[2:n+1] += clamp(o.stepsize * δq, -o.stepclip, o.stepclip)
             ε += o.stepsize * δε
 
-            if isempty(chebroots(Q; no_pts = max(12, n + 1)))
+            if isempty(chebroots(Q))
                 # No poles in the denominator of the rational approximant
                 normalize_unitrational!(p, q)
                 @. Pₓ = P(x)
@@ -925,7 +925,7 @@ function minimax_nodes(f, ∇f_pseudo::Fun{<:Chebyshev, T}, nnodes::Int; atol::T
     @assert nnodes >= 2
 
     # Local extremal nodes. Note: Sₓ = +1 for local maxima, -1 for local minima, but it is *not* necessarily the sign of f(x)
-    x, Sₓ = local_extremal_nodes(∇f_pseudo; no_pts = max(12, nnodes + 1))
+    x, Sₓ = local_extremal_nodes(∇f_pseudo)
     fₓ = @. f(x)
     check_signs(Sₓ; quiet)
 
@@ -971,7 +971,7 @@ function minimax_nodes(f, ∇f_pseudo::Fun{<:Chebyshev, T}, nnodes::Int; atol::T
     return x, fₓ, Sₓ
 end
 
-function local_extremal_nodes(∇f_pseudo::Fun{<:Chebyshev, T}; kwargs...) where {T <: AbstractFloat}
+function local_extremal_nodes(∇f_pseudo::Fun{<:Chebyshev, T}) where {T <: AbstractFloat}
     # Compute local extrema of a function f(x).
     #   - ∇f_pseudo(x) need only be pointwise proportional to ∇f(x), i.e. ∇f_pseudo(x) = ∇f(x) * g(x), where g(x) != 0 ∀ x ∈ domain(f)
     #   - ∇²f_pseudo(x) = d/dx ∇f_pseudo(x), and Sₓ = +1 for local maxima, -1 for local minima
@@ -982,7 +982,7 @@ function local_extremal_nodes(∇f_pseudo::Fun{<:Chebyshev, T}; kwargs...) where
     # Use at least 64-bit precision for initial node computation
     ∇f64 = lazychopcoeffs(convert(Vector{Float64}, ∇f); rtol = eps(Float64))
     ∇f64_pseudo = Fun(ChebSpace(Float64), ∇f64)
-    x = convert(Vector{T}, chebroots(∇f64_pseudo; kwargs...))
+    x = convert(Vector{T}, chebroots(∇f64_pseudo))
 
     # Compute sign of local extrema; +1 for local maxima, -1 for local minima
     Sₓ = @. -floatsign(∇²f_pseudo(x))
@@ -993,7 +993,7 @@ function local_extremal_nodes(∇f_pseudo::Fun{<:Chebyshev, T}; kwargs...) where
             x, Sₓ = refine_roots!(∇f_pseudo, ∇²f_pseudo, x)
         else
             # Computing nodes in lower precision failed to produce an alternating sequence of extrema; try again in higher precision
-            x = chebroots(∇f; kwargs...)
+            x = chebroots(∇f)
             Sₓ = @. -floatsign(∇²f_pseudo(x))
         end
     end
