@@ -1,7 +1,7 @@
 name = "CaratheodoryFejerApprox"
 uuid = "591793e0-8db6-4f40-aac6-a66fe5f65964"
-authors = ["Jonathan Doucette <jdoucette@physics.ubc.ca> and contributors"]
 version = "0.1.1"
+authors = ["Jonathan Doucette <jdoucette@physics.ubc.ca> and contributors"]
 
 [deps]
 AbstractFFTs = "621f4979-c628-5d54-868e-fcf4e3e8185c"
@@ -32,7 +32,7 @@ FFTW = "1.7"
 GenericFFT = "0.1"
 GenericLinearAlgebra = "0.3"
 LinearAlgebra = "1"
-MATLAB = "0.8"
+MATLAB = "0.8, 0.9"
 Polynomials = "4"
 PrecompileTools = "1"
 Roots = "2"
